@@ -32,7 +32,7 @@ fi
 
 #Read in list of CIDR networks from specified file:
 for CIDR in $(cat $1); do
-	#make results directory named after subnet, then cd into it:
+	#make results directory named after subnet:
 	DIRNAME=$(echo $CIDR | sed -e 's/\//_/g'); 
 	echo "Creating results directory for $CIDR. . .";
 	mkdir -p ./results/$DIRNAME;
