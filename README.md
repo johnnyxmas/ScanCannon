@@ -5,7 +5,7 @@ ScanCannon v0.6
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
-Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other greppable intermediary files, all nicely organized into per-network directories to make your boss think you know what you're doing. 
+Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files, all nicely organized into per-network directories to make your boss think you know what you're doing. 
 
 
 Software Requirements:
@@ -17,19 +17,24 @@ Software Requirements:
 
 Usage:
 =========
-Requires root.
-
 $ scancannon.sh [file . . .]
-Requires one argument: a file containing a line-separated list of CIDR networks
+
+File contains a line-separated list of CIDR networks, i.e.:
+
+	192.168.1.128/28
+	172.110.80.250/30
+	12.16.8.45/32
+	172.0.0.0/8
+
 
 Masscan & nmap arguments can be modified within the script.
 
 
 WARNING:
 =========
-It is VERY FEASIBLE to execute a Denial of Service against the taregt networks, even when launching from a single source. You should start with a very low masscan max-rate (5,000-10,000 kpps) and increas slowly to test. On bare metal, pushing beyond 20,000 seems to increase the chances of missing responses from the target. 40,000 kpps has been known to DoS ESXi virtual switches (even on the source). ~200,000 is often enough to take out ISP equipment. 
+It is VERY FEASIBLE to execute a Denial of Service against the target networks, even when launching from a single source. You should start with a very low masscan max-rate (5,000-10,000 kpps) and increase slowly to test. On bare metal, pushing beyond 20,000 seems to increase the chances of missing responses from the target. 40,000 kpps has been known to DoS ESXi virtual switches (even on the source). ~200,000 is often enough to take out ISP equipment. 
 
-Similar warnings exist for nmap, though it is much less dangerous. Some older or overutilized LANs may hiccup with a Timing of T4 or T5, but this is rare. 
+Similar warnings exist for nmap, though it is much less dangerous. Some older or over-utilized LANs may hiccup with a Timing of T4 or T5, but this is rare. 
 
 
 LICENSE
