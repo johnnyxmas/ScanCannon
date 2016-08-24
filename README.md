@@ -1,23 +1,25 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
-ScanCannon:
-Combines the speed of masscan with the reliability and detailed enumeration of nmap
+
+ScanCannon v0.6
 =========
-Bash script to handle enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. 
+The speed of masscan with the reliability and detailed enumeration of nmap!
+
+Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other greppable intermediary files, all nicely organized into per-network directories to make your boss think you know what you're doing. 
 
 
 Software Requirements:
 =========
-Linux w/ Bourne Again Shell (BASH) installed
-[Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
-[nmap v7.0.1+](https://github.com/nmap/nmap)
-Root / sudo access (for TCP fingerprinting)
+* Linux w/ Bourne Again Shell (BASH) installed
+* [Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
+* [nmap v7.0.1+](https://github.com/nmap/nmap)
+* Root / sudo access (for TCP fingerprinting)
 
 Usage:
 =========
 Requires root.
 
-scancannon.sh [file . . .]
+$ scancannon.sh [file . . .]
 Requires one argument: a file containing a line-separated list of CIDR networks
 
 Masscan & nmap arguments can be modified within the script.
@@ -55,4 +57,4 @@ You do not have to comply with the license for elements of the material in the p
 
 No warranties are given.
 
-For the full text of this license, see [LICENSE.md](https://github.com/johnnyxmas/ScanCannon/blob/master/LICENSE.md).
+For the full text of this license, see [LICENSE](https://github.com/johnnyxmas/ScanCannon/blob/master/LICENSE).
