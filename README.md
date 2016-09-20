@@ -1,17 +1,22 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
 
-ScanCannon v0.8
+ScanCannon v0.85
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
 Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files, all nicely organized into per-network directories to make your boss think you know what you're doing. 
 
 
-CHANGELOG FOR v0.8:
+CHANGELOG FOR v0.85:
 
-* Now generates ./results/dead_subnets.txt to provide a list of subnets that were not found to have any responsive hosts up
-* Now parses out all resolved domains/subdomains and writes them to ./results/$DIRNAME/discovered_domains.txt (per subnet) and ./results/all_discovered_domains.txt (total for all subnets)
+* Output files are now named more applicably
+* Some output changed to CSV where appropriate
+
+TO-DO:
+
+* Root domain detection for International TLDs (Such as .co.uk) doesn't work too well. Need to fix this. 
+* Would like to add some OSINT features based on historical WHOIS data (i.e. same phone #, same address, etc)
 
 
 
