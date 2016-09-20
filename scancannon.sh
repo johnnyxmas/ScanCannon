@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.8\n"
+echo -e "ScanCannon v0.85\n"
 
 #Help Text:
 function helptext {
@@ -50,7 +50,7 @@ for CIDR in $(cat $1); do
 	#Start Masscan:
 	iptables -A INPUT -p tcp --dport 60000 -j DROP;
 	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***";
-	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 20000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
+	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 15000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
 
 	if [ ! -s ./results/$DIRNAME/masscan-output.txt ]; then
         	echo -e "\nNo IPs are up; skipping nmap. This was a big waste of time.\n"
@@ -75,19 +75,32 @@ for CIDR in $(cat $1); do
         		nmap -vv -sV --version-intensity 5 -sT -O --max-rate 5000 -Pn -T3 -p $PORT -oA ./results/$DIRNAME/$FILENAME $IP;
 		done
 	
-		#Generate list of disvoered domains for this subnet
+		#Generate list of discovered sub/domains for this subnet
         	for TLD in `cat ./all_tlds.txt`; do
-                	cat ./results/$DIRNAME/$FILENAME.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' >> ./results/$DIRNAME/discovered_domains.txt;
-        	done
+                	cat ./results/$DIRNAME/$FILENAME.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' >> ./results/$DIRNAME/resolved_subdomains.txt;
+		done
+		echo "Root Domain,IP,AS CIDR" > ./results/$DIRNAME/resolved_root_domains.csv
+		for DOMAIN in `cat ./results/$DIRNAME/resolved_subdomains.txt | awk -F. '{ print $(NF-1)"."$NF }' | sort -u`; do
+			DIG=$(dig $DOMAIN +short); AS=$(whois $DIG  | grep CIDR | awk -F":           " '{ print $2 }');
+			echo $DOMAIN","$DIG","$AS >> ./results/$DIRNAME/resolved_root_domains.csv; 
+		done
 	fi
 done
 
 #Generate list subnets with no alive hosts
 comm -3 <(printf "%s\n" */*/*gnmap | sed -r 's/\/[^\/]+$//' | sort -u) <(printf "%s\n" */*) | awk -F"/" '{print $2}' | sed 's/\_/\//g' >> ./results/dead_subnets.txt
 
-#Concatenate list of all discovered domains
-for i in `find ./results -name discovered_domains.txt`; do 
-	cat $i >> ./results/all_discovered_domains.txt
+#Concatenate list of all discovered sub/domains
+for i in `find ./results -name resolved_subdomains.txt`; do 
+	cat $i >> ./results/all_subdomains.txt;
+done
+echo "Root Domain,IP,AS CIDR" > ./results/all_root_domains.txt
+for i in `find ./results -name resolved_root_domains.csv`; do 
+	cat $i | sed '1d' >> ./results/all_root_domains.txt;
+done
+
+for i in `find ./results -name discovered.csv`; do
+        cat $i >> ./results/all_IPs_and_ports.csv;
 done
 
 chmod -R 777 ./results #remove file restrictions
