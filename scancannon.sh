@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.85\n"
+echo -e "ScanCannon v0.89\n"
 
 #Help Text:
 function helptext {
@@ -50,7 +50,7 @@ for CIDR in $(cat $1); do
 	#Start Masscan:
 	iptables -A INPUT -p tcp --dport 60000 -j DROP;
 	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***";
-	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 15000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
+	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 5000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
 
 	if [ ! -s ./results/$DIRNAME/masscan-output.txt ]; then
         	echo -e "\nNo IPs are up; skipping nmap. This was a big waste of time.\n"
@@ -77,12 +77,16 @@ for CIDR in $(cat $1); do
 	
 		#Generate list of discovered sub/domains for this subnet
         	for TLD in `cat ./all_tlds.txt`; do
-                	cat ./results/$DIRNAME/$FILENAME.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' >> ./results/$DIRNAME/resolved_subdomains.txt;
+                	cat ./results/$DIRNAME/$FILENAME.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' | sort -u  >> ./results/$DIRNAME/resolved_subdomains.txt;
 		done
-		echo "Root Domain,IP,AS CIDR" > ./results/$DIRNAME/resolved_root_domains.csv
+		echo "Root Domain,IP,CIDR,AS#,IP Owner" > ./results/$DIRNAME/resolved_root_domains.csv
 		for DOMAIN in `cat ./results/$DIRNAME/resolved_subdomains.txt | awk -F. '{ print $(NF-1)"."$NF }' | sort -u`; do
-			DIG=$(dig $DOMAIN +short); AS=$(whois $DIG  | grep CIDR | awk -F":           " '{ print $2 }');
-			echo $DOMAIN","$DIG","$AS >> ./results/$DIRNAME/resolved_root_domains.csv; 
+			DIG=$(dig $DOMAIN +short); 
+			WHOIS=$(whois 213.171.195.105 | awk -F':[ ]*' '
+      			/CIDR:/ { cidr = $2 };
+      			/Organization:/ { org = $2};
+      			/OriginAS:/ { print cidr","$2","org}')
+			echo $DOMAIN","$DIG","$WHOIS >> ./results/$DIRNAME/resolved_root_domains.csv; 
 		done
 	fi
 done
@@ -103,6 +107,6 @@ for i in `find ./results -name discovered.csv`; do
         cat $i >> ./results/all_IPs_and_ports.csv;
 done
 
-chmod -R 777 ./results #remove file restrictions
+chmod -R 666 ./results #remove file restrictions
 
 echo -e "\nJob complete. Please check for any personal belongings before exiting the chamber."
