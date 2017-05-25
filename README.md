@@ -1,23 +1,21 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
 
-ScanCannon v0.85
+ScanCannon v0.91
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
 Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files, all nicely organized into per-network directories to make your boss think you know what you're doing. 
 
 
-CHANGELOG FOR v0.85:
+CHANGELOG FOR v0.91:
 
-* Output files are now named more applicably
-* Some output changed to CSV where appropriate
+* Sub/domain aggregation actually works now.
 
 TO-DO:
 
-* Root domain detection for International TLDs (Such as .co.uk) doesn't work too well. Need to fix this. 
-* Would like to add some OSINT features based on historical WHOIS data (i.e. same phone #, same address, etc)
-
+* Root domain detection for International TLDs (Such as .co.uk) doesn't work too well due to InterNIC, etc not complying with ARIN standards. Need to fix this.
+* Add arguments for Masscan & nmap speeds
 
 
 Software Requirements:
@@ -25,7 +23,7 @@ Software Requirements:
 * Linux w/ Bourne Again Shell (BASH) installed
 * [Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
 * [nmap v7.0.1+](https://github.com/nmap/nmap)
-* Root / sudo access (for TCP fingerprinting)
+* User with ability to capture raw packets (for TCP fingerprinting)
 
 Usage:
 =========
