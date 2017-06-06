@@ -82,7 +82,7 @@ for CIDR in $(cat $1); do
 		echo "Root Domain,IP,CIDR,AS#,IP Owner" > ./results/$DIRNAME/resolved_root_domains.csv
 		for DOMAIN in `cat ./results/$DIRNAME/resolved_subdomains.txt | awk -F. '{ print $(NF-1)"."$NF }' | sort -u`; do
 			DIG=$(dig $DOMAIN +short);
-			WHOIS=$(whois 213.171.195.105 | awk -F':[ ]*' '
+			WHOIS=$(whois $DIG | awk -F':[ ]*' '
       			/CIDR:/ { cidr = $2 };
       			/Organization:/ { org = $2};
       			/OriginAS:/ { print cidr","$2","org}')
