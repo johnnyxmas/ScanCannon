@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.91\n"
+echo -e "ScanCannon v0.92\n"
 
 #Help Text:
 function helptext {
