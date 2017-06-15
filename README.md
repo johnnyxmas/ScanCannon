@@ -1,21 +1,25 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
 
-ScanCannon v0.92
+ScanCannon v0.93
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
 Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files that include identified domains & subdomains, all nicely organized into per-network directories to make your boss think you know what you're doing.
 
 
-CHANGELOG FOR v0.91:
+CHANGELOG FOR v0.93:
 
-* Sub/domain aggregation actually works now.
+* Automatic iptables backup \ restore (iptables mod needed for masscan)
+* UDP nmap scan on interesting ports for all up hosts (masscan is TCP-only)
+* Generate lists of hosts listening on commonly-bruteforced ports such as 21, 445 & 3389
+* Corrected issue where full list of all up hosts & ports was not generated
 
 TO-DO:
 
 * Root domain detection for International TLDs (Such as .co.uk) doesn't work too well due to InterNIC, etc not complying with ARIN standards. Need to fix this.
 * Add arguments for Masscan & nmap speeds
+* Tarpit detection
 
 
 Software Requirements:
