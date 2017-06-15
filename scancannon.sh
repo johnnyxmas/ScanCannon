@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.92\n"
+echo -e "ScanCannon v0.93\n"
 
 #Help Text:
 function helptext {
@@ -34,11 +34,15 @@ fi
 if [ -s ./all_tlds.txt ]; then
 	rm ./all_tlds.txt
 	wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O ./all_tlds.txt
-        sed -i -e '1d' all_tlds.txt -e s/^/\\[\.\]/g
+  sed -i -e '1d' all_tlds.txt -e s/^/\\[\.\]/g
 else
 	wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O ./all_tlds.txt
 	sed -i -e '1d' all_tlds.txt -e s/^/\\[\.\]/g
 fi
+
+#Prep iptables for masscan
+iptables-save > /opt/iptables_before_masscan.backup
+iptables -A INPUT -p tcp --dport 60000 -j DROP;
 
 #Read in list of CIDR networks from specified file:
 for CIDR in $(cat $1); do
@@ -47,8 +51,7 @@ for CIDR in $(cat $1); do
 	echo "Creating results directory for $CIDR. . .";
 	mkdir -p ./results/$DIRNAME;
 
-	#Start Masscan:
-	iptables -A INPUT -p tcp --dport 60000 -j DROP;
+  #Start Masscan:
 	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***";
 	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 20000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
 
@@ -65,18 +68,30 @@ for CIDR in $(cat $1); do
         		for (j = 1; j <= i; j++) {
           		 printf("%s:%s\n%s",  Key[j], Val[Key[j]], (j == i) ? "" : "\n");
         		}
-    		}' | sed 's/,$//' > ./results/$DIRNAME/discovered_hosts.txt #remove trailing comma, write to file
+    		}' | sed 's/,$//' > ./results/$DIRNAME/discovered_hosts.txt
 
 		#Run in-depth nmap enumeration against discovered hosts & ports:
 		for TARGET in $(cat ./results/$DIRNAME/discovered_hosts.txt); do
     	   		IP=$(echo $TARGET | awk -F: '{print $1}');
         		PORT=$(echo $TARGET | awk -F: '{print $2}');
-        		FILENAME=$(echo $IP | awk '{print "nmap_"$1}');
-        		nmap -vv -sV --version-intensity 5 -sT -O --max-rate 15000 -Pn -T3 -p $PORT -oA ./results/$DIRNAME/$FILENAME $IP;
+        		FILENAME=$(echo $IP | awk '{print "nmap_"$1}')
+        		nmap -vv -sV --version-intensity 5 -sT -O --max-rate 15000 -Pn -T3 -p $PORT -oA ./results/$DIRNAME/"$FILENAME"_tcp $IP;
+        		#Blind UDP nmap scan of common ports, as masscan does not support UDP
+        		nmap -vv -sV --version-intensity 5 -sU -O --max-rate 15000 -Pn -T3 -p 53,161,500 -oA ./results/$DIRNAME/"$FILENAME"_udp $IP;
 		done
 
+		#Generate lists of potential bruteforce / interesting hosts
+  		mkdir -p ./results/$DIRNAME/bruteforce_ports
+  		for PORT in 21 22 23 139 445 500 1701 1723 3306 3389 5060 27107; do
+        GREPHOSTS=$(egrep "\D$PORT\D|$PORT$" ./results/$DIRNAME/discovered_hosts.txt | cut -d ":" -f1);
+        if [ ! -z $GREPHOSTS ]
+        then
+          echo $GREPHOSTS > ./results/$DIRNAME/bruteforce_hosts/"$PORT"_bfhosts.txt
+        fi
+  		done
+
 		#Generate list of discovered sub/domains for this subnet
-        	for TLD in `cat ./all_tlds.txt`; do
+        for TLD in `cat ./all_tlds.txt`; do
                 	cat ./results/$DIRNAME/*.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' | sort -u  >> ./results/$DIRNAME/resolved_subdomains.txt;
 		done
 		echo "Root Domain,IP,CIDR,AS#,IP Owner" > ./results/$DIRNAME/resolved_root_domains.csv
@@ -91,8 +106,20 @@ for CIDR in $(cat $1); do
 	fi
 done
 
+#restore iptables backup
+iptables-restore < /opt/iptables_before_masscan.backup
+
+echo -e "\nCreating useful files. . ."
+
 #Generate list subnets with no alive hosts
 comm -3 <(printf "%s\n" */*/*gnmap | sed -r 's/\/[^\/]+$//' | sort -u) <(printf "%s\n" */*) | awk -F"/" '{print $2}' | sed 's/\_/\//g' >> ./results/dead_subnets.txt
+
+#Concatenate lists of all potential bruteforce hosts
+mkdir -p ./results/bruteforce_hosts
+for BFFILE in `find ./results -name *_bfhosts.txt`; do
+	BPORT=$(echo $BFFILE | egrep -o '\d*_bfhosts.txt' | cut -d "_" -f1);
+	cat $BFFILE >> ./results/bruteforce_hosts/$BPORT/all_"$BPORT"_bfhosts.txt;
+done
 
 #Concatenate list of all discovered sub/domains
 for i in `find ./results -name resolved_subdomains.txt`; do
@@ -103,8 +130,8 @@ for i in `find ./results -name resolved_root_domains.csv`; do
 	cat $i | sed '1d' >> ./results/all_root_domains.txt;
 done
 
-for i in `find ./results -name discovered.csv`; do
-        cat $i >> ./results/all_IPs_and_ports.csv;
+for i in `find ./results -name discovered_hosts.txt`; do
+    cat $i >> ./results/all_IPs_and_ports.csv;
 done
 
 chmod -R 777 results #remove file restrictions
