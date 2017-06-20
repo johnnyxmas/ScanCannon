@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.93\n"
+echo -e "ScanCannon v0.94F\n"
 
 #Help Text:
 function helptext {
@@ -84,7 +84,7 @@ for CIDR in $(cat $1); do
   		mkdir -p ./results/$DIRNAME/bruteforce_ports
   		for PORT in 21 22 23 139 445 500 1701 1723 3306 3389 5060 27107; do
         GREPHOSTS=$(egrep "\D$PORT\D|$PORT$" ./results/$DIRNAME/discovered_hosts.txt | cut -d ":" -f1);
-        if [ ! -z $GREPHOSTS ]
+        if [ ! -z "$GREPHOSTS" ]
         then
           echo $GREPHOSTS > ./results/$DIRNAME/bruteforce_hosts/"$PORT"_bfhosts.txt
         fi
