@@ -1,12 +1,16 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
 
-ScanCannon v0.93
+ScanCannon v0.94F
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
 Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files that include identified domains & subdomains, all nicely organized into per-network directories to make your boss think you know what you're doing.
 
+
+CHANGELOG FOR v0.94F:
+
+* Fixed issue with bruteforce-able hosts not being enumerated under certain circumstances
 
 CHANGELOG FOR v0.93:
 
