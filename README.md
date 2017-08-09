@@ -8,16 +8,10 @@ The speed of masscan with the reliability and detailed enumeration of nmap!
 Handles the enumeration of large networks, including banner grabbing & OS / service version guessing at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files that include identified domains & subdomains, all nicely organized into per-network directories to make your boss think you know what you're doing.
 
 
-CHANGELOG FOR v0.94F:
+CHANGELOG FOR v0.95:
 
-* Fixed issue with bruteforce-able hosts not being enumerated under certain circumstances
+* Fixed issue with some final catalogue files being generated
 
-CHANGELOG FOR v0.93:
-
-* Automatic iptables backup \ restore (iptables mod needed for masscan)
-* UDP nmap scan on interesting ports for all up hosts (masscan is TCP-only)
-* Generate lists of hosts listening on commonly-bruteforced ports such as 21, 445 & 3389
-* Corrected issue where full list of all up hosts & ports was not generated
 
 TO-DO:
 
@@ -28,10 +22,10 @@ TO-DO:
 
 Software Requirements:
 =========
-* Linux w/ Bourne Again Shell (BASH) installed
+* GNU Utilities
 * [Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
 * [nmap v7.0.1+](https://github.com/nmap/nmap)
-* User with ability to capture raw packets (for TCP fingerprinting)
+* Root \ sudo privs (for TCP fingerprinting)
 
 Usage:
 =========

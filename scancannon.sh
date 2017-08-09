@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo -e "ScanCannon v0.94F\n"
+echo -e "ScanCannon v0.95\n"
 
 #Help Text:
 function helptext {
@@ -92,7 +92,7 @@ for CIDR in $(cat $1); do
 
 		#Generate list of discovered sub/domains for this subnet
         for TLD in `cat ./all_tlds.txt`; do
-                	cat ./results/$DIRNAME/*.gnmap | egrep -i $TLD\) | awk -F[\(\)] '{print $2}' | sort -u  >> ./results/$DIRNAME/resolved_subdomains.txt;
+                	cat ./results/$DIRNAME/*.gnmap | egrep -i $TLD | awk -F[\(\)] '{print $2}' | sort -u  >> ./results/$DIRNAME/resolved_subdomains.txt;
 		done
 		echo "Root Domain,IP,CIDR,AS#,IP Owner" > ./results/$DIRNAME/resolved_root_domains.csv
 		for DOMAIN in `cat ./results/$DIRNAME/resolved_subdomains.txt | awk -F. '{ print $(NF-1)"."$NF }' | sort -u`; do
