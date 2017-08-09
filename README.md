@@ -1,7 +1,7 @@
 ![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
 
 
-ScanCannon v0.94F
+ScanCannon v0.95
 =========
 The speed of masscan with the reliability and detailed enumeration of nmap!
 
