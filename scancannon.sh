@@ -134,6 +134,12 @@ for i in `find ./results -name discovered_hosts.txt`; do
     cat $i >> ./results/all_IPs_and_ports.csv;
 done
 
+#Move nmap XML files to their own directory for easy access by other tools
+mkdir ./results/nmap_xml
+for XML_FILE in `find ./results/ -name *.xml`; do
+	mv $XML_FILE ./results/nmap_xml/;
+done
+
 chmod -R 777 results #remove file restrictions
 
 echo -e "\nJob complete. Please check for any personal belongings before exiting the chamber."

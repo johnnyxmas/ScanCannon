@@ -11,6 +11,7 @@ Handles the enumeration of large networks, including banner grabbing & OS / serv
 CHANGELOG FOR v0.95:
 
 * Fixed issue with some final catalogue files being generated
+* Now moves nma *.xml files to their own directory to more easily suck them into other tools
 
 
 TO-DO:
