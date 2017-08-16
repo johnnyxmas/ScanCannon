@@ -118,7 +118,7 @@ comm -3 <(printf "%s\n" */*/*gnmap | sed -r 's/\/[^\/]+$//' | sort -u) <(printf 
 mkdir -p ./results/bruteforce_hosts
 for BFFILE in `find ./results -name *_bfhosts.txt`; do
 	BPORT=$(echo $BFFILE | egrep -o '\d*_bfhosts.txt' | cut -d "_" -f1);
-	cat $BFFILE >> ./results/bruteforce_hosts/$BPORT/all_"$BPORT"_bfhosts.txt;
+	cat $BFFILE >> ./results/bruteforce_hosts/all_"$BPORT"_bfhosts.txt;
 done
 
 #Concatenate list of all discovered sub/domains
