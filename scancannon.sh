@@ -81,7 +81,7 @@ for CIDR in $(cat $1); do
 		done
 
 		#Generate lists of potential bruteforce / interesting hosts
-  		mkdir -p ./results/$DIRNAME/bruteforce_ports
+  		mkdir -p ./results/$DIRNAME/bruteforce_hosts
   		for PORT in 21 22 23 139 445 500 1701 1723 3306 3389 5060 27107; do
         GREPHOSTS=$(egrep "\D$PORT\D|$PORT$" ./results/$DIRNAME/discovered_hosts.txt | cut -d ":" -f1);
         if [ ! -z "$GREPHOSTS" ]
