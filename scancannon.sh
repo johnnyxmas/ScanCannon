@@ -1,29 +1,44 @@
 #!/bin/bash
-
-echo -e "ScanCannon v0.95\n"
+echo -e "ScanCannon v1.0\n"
 
 #Help Text:
-function helptext {
+function helptext() {
+	echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
 	echo "usage: scancannon.sh [file . . .]"
-	echo "Requires one argument: a file containing a line-separated list of CIDR addresses"
 }
 
-#Make sure an non-empty file is supplied as an argument:
+#Make sure a non-empty file is supplied as an argument:
 if [ "$#" -ne 1 ]; then
-	echo  "ERROR: Invalid argument(s)."
+	echo "ERROR: Invalid argument(s)."
 	helptext >&2
 	exit 1
-elif [ ! -s $1 ]; then
-	echo "ERROR: CIDR file is empty"
+elif [ ! -s "$1" ]; then
+	echo "ERROR: CIDR file is empty or does not exist"
 	helptext >&2
 	exit 1
 fi
 
-#Check for root (both masscan & nmap require root for certain activities):
+#Check for root:
 if [ "$(id -u)" != "0" ]; then
 	echo "ERROR: This script must be run as root"
 	helptext >&2
 	exit 1
+fi
+
+#Check if MacOS
+if [ "$(uname)" = "Darwin" ]; then
+	MACOS=1
+else
+	MACOS=0
+fi
+
+#Alert for existing Results files
+if [ -s ./results ]; then
+	read -p "Results folder exists. New results will be combined with existing. Re-scanning previous subnets will overwrite some files. Proceed?" -n 1 -r
+	echo
+	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+		exit 1
+	fi
 fi
 
 #######################
@@ -33,113 +48,120 @@ fi
 #Download and prep the lastest list of TLDs from IANA
 if [ -s ./all_tlds.txt ]; then
 	rm ./all_tlds.txt
-	wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O ./all_tlds.txt
-  sed -i -e '1d' all_tlds.txt -e s/^/\\[\.\]/g
+fi
+wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O ./all_tlds.txt
+vi -c ':1d' -c ':%s/^/\\[\.\]/g' -c ':wq' all_tlds.txt
+
+#Prep packet filter for masscan. If you are using something else, you MUST do this manually.
+if [ "$MACOS" != 1 ]; then
+	iptables -A INPUT -p tcp --dport 40000:41023 -j DROP
 else
-	wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O ./all_tlds.txt
-	sed -i -e '1d' all_tlds.txt -e s/^/\\[\.\]/g
+	cp /etc/pf.conf /etc/pf.bak
+	echo 'block in proto tcp from any to any port 40000 >< 41024' >>/etc/pf.conf
+	pfctl -f /etc/pf.conf
 fi
 
-#Prep iptables for masscan
-iptables-save > /opt/iptables_before_masscan.backup
-iptables -A INPUT -p tcp --dport 60000 -j DROP;
-
 #Read in list of CIDR networks from specified file:
-for CIDR in $(cat $1); do
-	#make results directory named after subnet:
-	DIRNAME=$(echo $CIDR | sed -e 's/\//_/g');
-	echo "Creating results directory for $CIDR. . .";
-	mkdir -p ./results/$DIRNAME;
+while read -r CIDR; do
+	echo "$CIDR"
+	#make results directories named after subnet:
+	DIRNAME=$(sed -e 's/\//_/g' <<<"$CIDR")
+	echo "Creating results directory for $CIDR. . ."
+	mkdir -p ./results/"$DIRNAME"
 
-  #Start Masscan:
-	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***";
-	masscan --open --banners --source-port 60000 -p0-65535 --max-rate 20000 -oB ./results/$DIRNAME/masscan.bin $CIDR; masscan --readscan ./results/$DIRNAME/masscan.bin -oL ./results/$DIRNAME/masscan-output.txt;
+	#Start Masscan. Write to binary file so users can --readscan it to whatever they need later:
+	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***"
+	masscan -c scancannon.conf --open --source-port 40000-41023 -oB ./results/"$DIRNAME"/masscan_output.bin "$CIDR"
+	masscan --readscan ./results/"$DIRNAME"/masscan_output.bin -oL ./results/"$DIRNAME"/masscan_output.txt
 
-	if [ ! -s ./results/$DIRNAME/masscan-output.txt ]; then
-        	echo -e "\nNo IPs are up; skipping nmap. This was a big waste of time.\n"
-	else
-		#Consolidate IPs and open ports for each IP, then write to a file because files are handy:
-		awk '/open/ {print $4,$3,$2,$1}' ./results/$DIRNAME/masscan-output.txt |  awk '
-    			/.+/{
-        			if (!($1 in Val)) { Key[++i] = $1; }
-        			Val[$1] = Val[$1] $2 ",";
-    				}
-    		END{
-        		for (j = 1; j <= i; j++) {
-          		 printf("%s:%s\n%s",  Key[j], Val[Key[j]], (j == i) ? "" : "\n");
-        		}
-    		}' | sed 's/,$//' > ./results/$DIRNAME/discovered_hosts.txt
-
-		#Run in-depth nmap enumeration against discovered hosts & ports:
-		for TARGET in $(cat ./results/$DIRNAME/discovered_hosts.txt); do
-    	   		IP=$(echo $TARGET | awk -F: '{print $1}');
-        		PORT=$(echo $TARGET | awk -F: '{print $2}');
-        		FILENAME=$(echo $IP | awk '{print "nmap_"$1}')
-        		nmap -vv -sV --version-intensity 5 -sT -O --max-rate 15000 -Pn -T3 -p $PORT -oA ./results/$DIRNAME/"$FILENAME"_tcp $IP;
-        		#Blind UDP nmap scan of common ports, as masscan does not support UDP
-        		nmap -vv -sV --version-intensity 5 -sU -O --max-rate 15000 -Pn -T3 -p 53,161,500 -oA ./results/$DIRNAME/"$FILENAME"_udp $IP;
-		done
-
-		#Generate lists of potential bruteforce / interesting hosts
-  		mkdir -p ./results/$DIRNAME/bruteforce_hosts
-  		for PORT in 21 22 23 139 445 500 1701 1723 3306 3389 5060 27107; do
-        GREPHOSTS=$(egrep "\D$PORT\D|$PORT$" ./results/$DIRNAME/discovered_hosts.txt | cut -d ":" -f1);
-        if [ ! -z "$GREPHOSTS" ]
-        then
-          echo $GREPHOSTS > ./results/$DIRNAME/bruteforce_hosts/"$PORT"_bfhosts.txt
-        fi
-  		done
-
-		#Generate list of discovered sub/domains for this subnet
-        for TLD in `cat ./all_tlds.txt`; do
-                	cat ./results/$DIRNAME/*.gnmap | egrep -i $TLD | awk -F[\(\)] '{print $2}' | sort -u  >> ./results/$DIRNAME/resolved_subdomains.txt;
-		done
-		echo "Root Domain,IP,CIDR,AS#,IP Owner" > ./results/$DIRNAME/resolved_root_domains.csv
-		for DOMAIN in `cat ./results/$DIRNAME/resolved_subdomains.txt | awk -F. '{ print $(NF-1)"."$NF }' | sort -u`; do
-			DIG=$(dig $DOMAIN +short);
-			WHOIS=$(whois $DIG | awk -F':[ ]*' '
-      			/CIDR:/ { cidr = $2 };
-      			/Organization:/ { org = $2};
-      			/OriginAS:/ { print cidr","$2","org}')
-			echo $DOMAIN","$DIG","$WHOIS >> ./results/$DIRNAME/resolved_root_domains.csv;
-		done
+	if [ ! -s ./results/"$DIRNAME"/masscan_output.txt ]; then
+		echo -e "\nNo IPs are up; skipping nmap. This was a big waste of time.\n"
 	fi
+	#Consolidate IPs and open ports for each IP:
+	awk '/open/ {print $4,$3,$2,$1}' ./results/"$DIRNAME"/masscan_output.txt | awk '
+			/.+/{
+				if (!($1 in Val)) { Key[++i] = $1; }
+				Val[$1] = Val[$1] $2 ",";
+				}
+		END{
+			for (j = 1; j <= i; j++) {
+				printf("%s:%s\n%s",  Key[j], Val[Key[j]], (j == i) ? "" : "");
+			}
+		}' | sed 's/,$//' >>./results/"$DIRNAME"/hosts_and_ports.txt
+
+	#Run in-depth nmap enumeration against discovered hosts & ports, and output to all formats
+	#First we have to do a blind UDP nmap scan of common ports, as masscan does not support UDP. Note we Ping here to reduce scan time.
+	echo -e "\nStarting DNS, SNMP and VPN scan against all hosts"
+	#nmap -v --open -sV --version-light -sU -T3 -p 53,161,500 -oA ./results/"$DIRNAME"/nmap_"$DIRNAME"_udp "$CIDR"
+	#Then nmap TCP against masscan-discovered hosts:
+	while read -r TARGET; do
+		IP=$(echo "$TARGET" | awk -F: '{print $1}')
+		PORT=$(echo "$TARGET" | awk -F: '{print $2}')
+		FILENAME=$(echo "$IP" | awk '{print "nmap_"$1}')
+		echo -e "\nBeginning in-depth TCP scan of $IP on port(s) $PORT:\n"
+		nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$PORT" -oA ./results/"$DIRNAME"/"$FILENAME"_tcp "$IP"
+	done <./results/"$DIRNAME"/hosts_and_ports.txt
+
+	#Generate lists of Hosts:Ports hosting Interesting Services™️ for importing into cred stuffers (or other tools)
+	mkdir -p ./results/"$DIRNAME"/interesting_servers/
+	mkdir -p ./results/all_interesting_servers/
+	#(if you add to this service list, make sure you also add it to the master file generation list at the end.)
+	for SERVICE in domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https; do
+		RESULT=$(grep -h -o -E ".+ \d?\d?\d?\d\d/open/..p//$SERVICE" ./results/"$DIRNAME"/*.gnmap)
+		if [ -n "$RESULT" ]; then
+			SERVIP=$(echo "$RESULT" | tr -d '\n' < <(awk -F" " '{print $2}'))
+			SERVPORT=$(echo "$RESULT" | grep -o -E "\d?\d?\d?\d\d/open/..p//$SERVICE" | awk -F"/" '{print $1}')
+		fi
+		if [ -n "$SERVIP" ]; then
+			ECHO "$SERVIP":"$SERVPORT" | tee ./results/"$DIRNAME"/interesting_servers/"$SERVICE"_servers.txt >> ./results/all_interesting_servers/all_"$SERVICE"_servers.txt
+			unset SERVIP
+			unset SERVPORT
+		fi
+	done
+
+	#Generate list of discovered sub/domains for this subnet.
+	echo "Root Domain,IP,CIDR,AS#,IP Owner" | tee ./results/"$DIRNAME"/resolved_root_domains.csv >>./results/all_root_domains.csv
+	while read -r TLD; do
+		grep -E -i "$TLD" ./results/"$DIRNAME"/*.gnmap | awk -F[\(\)] '{print $2}' | sort -u | tee ./results/"$DIRNAME"/resolved_subdomains.txt >>./results/all_subdomains.txt
+	done <./all_tlds.txt
+	while read -r DOMAIN; do
+		DIG=$(dig "$DOMAIN" +short)
+		WHOIS=$(whois "$DIG" | awk -F':[ ]*' '
+			/CIDR:/ { cidr = $2 };
+			/Organization:/ { org = $2};
+			/OriginAS:/ { print cidr","$2","org}')
+		echo "$DOMAIN"",""$DIG"",""$WHOIS" | tee ./results/"$DIRNAME"/resolved_root_domains.csv >>./results/all_root_domains.csv
+	done < <(awk -F. '{ print $(NF-1)"."$NF }' ./results/"$DIRNAME"/resolved_subdomains.txt)
+done < "$1"
+
+
+#Restore packet filter backup
+echo -e "\nAll scans completed. Reverting packet filter configuration. . . "
+if [ "$MACOS" != 1 ]; then
+	iptables -D INPUT -p tcp --dport 40000:41023 -j DROP
+else
+	mv /etc/pf.bak /etc/pf.conf
+	pfctl -q -f /etc/pf.conf
+fi
+
+#Report unresponsive networks:
+comm -3 <(printf "%s\n" ./*/*/*gnmap | sed 's/\/[^\/]+$//' | sort -u) <(printf "%s\n" ./*/*) | awk -F"/" '{print $2}' | sed 's/\_/\//g' >>./results/dead_networks.txt
+
+##############
+#Housekeeping#
+##############
+echo -e "\nPerforming cleanup. . . "
+#while read -r MASSFILE; do
+	#rm "$MASSFILE"
+#done < <(find ./results -name masscan_output.txt)
+rm ./paused.conf
+for DIRECTORY in $(echo ./results/*/); do
+	#mkdir -p "$DIRECTORY"{nmap_files,gnmap_files,nmap_xml_files}
+	mv -f "$DIRECTORY"*.nmap "$DIRECTORY"nmap_files/ 2>/dev/null
+	mv -f "$DIRECTORY"*.gnmap "$DIRECTORY"gnmap_files/ 2>/dev/null
+	mv -f "$DIRECTORY"*.xml "$DIRECTORY"nmap_xml_files/ 2>/dev/null
+	rm -rf ./results/all_interesting_servers/*_files   #fix this fix. 
 done
+chmod -R 776 ./results
 
-#restore iptables backup
-iptables-restore < /opt/iptables_before_masscan.backup
-
-echo -e "\nCreating useful files. . ."
-
-#Generate list subnets with no alive hosts
-comm -3 <(printf "%s\n" */*/*gnmap | sed -r 's/\/[^\/]+$//' | sort -u) <(printf "%s\n" */*) | awk -F"/" '{print $2}' | sed 's/\_/\//g' >> ./results/dead_subnets.txt
-
-#Concatenate lists of all potential bruteforce hosts
-mkdir -p ./results/bruteforce_hosts
-for BFFILE in `find ./results -name *_bfhosts.txt`; do
-	BPORT=$(echo $BFFILE | egrep -o '\d*_bfhosts.txt' | cut -d "_" -f1);
-	cat $BFFILE >> ./results/bruteforce_hosts/all_"$BPORT"_bfhosts.txt;
-done
-
-#Concatenate list of all discovered sub/domains
-for i in `find ./results -name resolved_subdomains.txt`; do
-	cat $i >> ./results/all_subdomains.txt;
-done
-echo "Root Domain,IP,AS CIDR" > ./results/all_root_domains.txt
-for i in `find ./results -name resolved_root_domains.csv`; do
-	cat $i | sed '1d' >> ./results/all_root_domains.txt;
-done
-
-for i in `find ./results -name discovered_hosts.txt`; do
-    cat $i >> ./results/all_IPs_and_ports.csv;
-done
-
-#Move nmap XML files to their own directory for easy access by other tools
-mkdir ./results/nmap_xml
-for XML_FILE in `find ./results/ -name *.xml`; do
-	mv $XML_FILE ./results/nmap_xml/;
-done
-
-chmod -R 777 results #remove file restrictions
-
-echo -e "\nJob complete. Please check for any personal belongings before exiting the chamber."
+echo -e "\nPowering down ScanCannon. Please check for any personal belongings before exiting the chamber."

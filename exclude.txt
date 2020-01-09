@@ -1,0 +1,2 @@
+# List of addresses to exlude from scanning
+255.255.255.255
