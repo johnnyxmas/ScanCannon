@@ -1,4 +1,4 @@
-![scancannon](http://oi43.tinypic.com/2vwwdpw.jpg)
+![scancannon](https://i.kym-cdn.com/photos/images/original/000/175/719/1155844718213mp8.jpg)
 
 
 ScanCannon v1.0-beta
