@@ -1,5 +1,6 @@
 #!/bin/bash
-echo -e "ScanCannon v1.0\n"
+set -euo pipefail
+echo -e "ScanCannon v1.0-beta\n"
 
 #Help Text:
 function helptext() {
@@ -39,6 +40,8 @@ if [ -s ./results ]; then
 	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 		exit 1
 	fi
+else
+	mkdir results
 fi
 
 #######################
@@ -63,7 +66,7 @@ fi
 
 #Read in list of CIDR networks from specified file:
 while read -r CIDR; do
-	echo "$CIDR"
+	echo "Scanning $CIDR..."
 	#make results directories named after subnet:
 	DIRNAME=$(sed -e 's/\//_/g' <<<"$CIDR")
 	echo "Creating results directory for $CIDR. . ."
@@ -71,7 +74,7 @@ while read -r CIDR; do
 
 	#Start Masscan. Write to binary file so users can --readscan it to whatever they need later:
 	echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***"
-	masscan -c scancannon.conf --open --source-port 40000-41023 -oB ./results/"$DIRNAME"/masscan_output.bin "$CIDR"
+	masscan -c scancannon.conf --open --source-port 40000 -oB ./results/"$DIRNAME"/masscan_output.bin "$CIDR"
 	masscan --readscan ./results/"$DIRNAME"/masscan_output.bin -oL ./results/"$DIRNAME"/masscan_output.txt
 
 	if [ ! -s ./results/"$DIRNAME"/masscan_output.txt ]; then
