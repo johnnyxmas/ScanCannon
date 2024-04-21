@@ -15,11 +15,31 @@ echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═�
 
 echo -e "••¤(×[¤ ScanCannon v1.0 by J0hnnyXm4s ¤]×)¤••\n"
 
+# Check for updates
+REMOTE_TIMESTAMP=$(curl -s -I https://raw.githubusercontent.com/johnnyxmas/ScanCannon/main/scancannon.sh | grep -i 'last-modified' | awk '{print $2, $3, $4, $5, $6}' | xargs -i date -d "{}" +%s)
+LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
+
+if [[ "$REMOTE_TIMESTAMP" > "$LOCAL_TIMESTAMP" ]]; then
+    read -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
+    case "$update_choice" in
+        y|Y )
+            if git pull origin main; then
+                echo "ScanCannon has been updated successfully."
+            else
+                echo "Failed to update ScanCannon via git. Please manually download the latest version from https://github.com/johnnyxmas/ScanCannon/"
+            fi
+            ;;
+        * )
+            echo "Update skipped. Continuing with the current version."
+            ;;
+    esac
+fi
+
 #Help Text:
 function helptext() {
 echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
 echo "usage: scancannon.sh [-u] [CIDR range | file containing line-separated CIDR ranges]"
-echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap (very slow)"
+echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap"
 }
 
 #Check if required tools are installed
@@ -54,7 +74,7 @@ exit 1
 fi
 
 #Check if the argument is a valid CIDR range or a file
-if echo "$1" | grep -qE '^([0-9]{1,3}.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$'; then
+if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$'; then
 CIDR_RANGES=("$1")
 elif [ -s "$1" ]; then
 readarray -t CIDR_RANGES < "$1"
@@ -97,7 +117,7 @@ if ! wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O "./all_tlds.txt"
 echo "ERROR: Failed to download TLD list. Please check your internet connection and try again."
 exit 1
 fi
-vi -c ':1d' -c ':%s/^/[.]/g' -c ':wq' "all_tlds.txt"
+vi -c ':1d' -c ':%s/^/\[.]/g' -c ':wq' "all_tlds.txt"
 
 #Prep packet filter for masscan. If you are using something else, you MUST do this manually.
 if [ "$MACOS" != 1 ]; then
@@ -117,11 +137,20 @@ TOTAL_IPS=0
 RESPONSIVE_IPS=0
 DISCOVERED_SERVICES=0
 
+# Handle Ctrl+C
+function ctrl_c() {
+echo -e "\n\n[!] Ctrl+C detected. Cleaning up..."
+cleanup
+echo -e "Exiting."
+exit 0
+}
+trap ctrl_c INT
+
 #Process each CIDR range
 for CIDR in "${CIDR_RANGES[@]}"; do
 echo "Scanning $CIDR..."
 #make results directories named after subnet:
-DIRNAME="$(sed -e 's///_/g' <<<"$CIDR")"
+DIRNAME="$(sed -e 's/\//_/g' <<<"$CIDR")"
 echo "Creating results directory for $CIDR. . ."
 mkdir -p "./results/$DIRNAME"
 #Start Masscan. Write to binary file so users can --readscan it to whatever they need later:
@@ -152,6 +181,10 @@ awk '/open/ {print $4,$3,$2,$1}' "./results/$DIRNAME/masscan_output.txt" | awk '
 #Update responsive IPs count
 RESPONSIVE_IPS=$((RESPONSIVE_IPS + $(awk '{print $1}' "./results/$DIRNAME/hosts_and_ports.txt" | sort -u | wc -l)))
 
+# Initialize progress bar
+TOTAL_HOSTS=$(wc -l < "./results/$DIRNAME/hosts_and_ports.txt")
+CURRENT_HOST=0
+
 #Run in-depth nmap enumeration against discovered hosts & ports, and output to all formats
 #First we have to do a blind UDP nmap scan of common ports, as masscan does not support UDP. Note we Ping here to reduce scan time.
 if [ "$UDP_SCAN" -eq 1 ]; then
@@ -165,7 +198,13 @@ while read -r TARGET; do
     FILENAME="$(echo "$IP" | awk '{print "nmap_"$1}')"
     echo -e "\nBeginning in-depth TCP scan of $IP on port(s) $PORT:\n"
     nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$PORT" -oA "./results/$DIRNAME/${FILENAME}_tcp" "$IP"
+
+    # Update progress bar
+    CURRENT_HOST=$((CURRENT_HOST + 1))
+    PROGRESS=$((CURRENT_HOST * 100 / TOTAL_HOSTS))
+    echo -ne "\rProgress: [$PROGRESS%] [$CURRENT_HOST/$TOTAL_HOSTS] hosts scanned..."
 done <"./results/$DIRNAME/hosts_and_ports.txt"
+echo -ne "\rProgress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n"
 
 #Generate lists of Hosts:Ports hosting Interesting Services™️ for importing into cred stuffers (or other tools)
 mkdir -p "./results/$DIRNAME/interesting_servers/"
@@ -211,22 +250,21 @@ pfctl -q -f /etc/pf.conf
 fi
 
 #Report unresponsive networks:
-comm -3 <(printf "%s\n" .///gnmap | sed 's//[^/]+$//' | sort -u) <(printf "%s\n" .//*) | awk -F"/" '{print $2}' | sed 's/_///g' >>"./results/dead_networks.txt"
+comm -3 <(printf "%s\n" ./*/*/*gnmap | sed 's/\/[^\/]\+$//' | sort -u) <(printf "%s\n" ./*/*) | awk -F"/" '{print $2}' | sed 's/\_/\//g' >>"./results/dead_networks.txt"
 
 #Housekeeping
 function cleanup() {
 echo -e "\nPerforming cleanup. . . "
 rm ./paused.conf
-for DIRECTORY in ./results//; do
+for DIRECTORY in ./results/*/; do
 #mkdir -p "$DIRECTORY"{nmap_files,gnmap_files,nmap_xml_files}
-mv -f "$DIRECTORY".nmap "$DIRECTORY"nmap_files/ 2>/dev/null
-mv -f "$DIRECTORY".gnmap "$DIRECTORY"gnmap_files/ 2>/dev/null
-mv -f "$DIRECTORY".xml "$DIRECTORY"nmap_xml_files/ 2>/dev/null
+mv -f "$DIRECTORY"*.nmap "$DIRECTORY"nmap_files/ 2>/dev/null
+mv -f "$DIRECTORY"*.gnmap "$DIRECTORY"gnmap_files/ 2>/dev/null
+mv -f "$DIRECTORY"*.xml "$DIRECTORY"nmap_xml_files/ 2>/dev/null
 rm -rf "./results/all_interesting_servers/"*_files 2>/dev/null
 done
 chmod -R 776 "./results"
 }
-cleanup
 
 #Print summary
 echo -e "\nScan Summary:"
