@@ -1,46 +1,54 @@
-# ScanCannon v1.0-beta
+# ScanCannon v1.1
 
-![scancannon](https://i.kym-cdn.com/photos/images/original/000/175/719/1155844718213mp8.jpg)
+![scancannon](https://i.imgur.com/FUvPADq.png)
 
-A POSIX-compliant BASH script for efficient reconnaissance and attack prep against massive edge networks!
+**A Bash script for efficient enumeration of massive Internet network ranges.**
 
-Handles the enumeration of large edge networks at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems / services listening on those ports. Data is stored in both masscan & nmap standard outputs, as well as a few other grepable intermediary files that include identified domains & subdomains, all nicely organized into per-network directories to make your boss think you know what you're doing. Most importantly (IMHO), quite a number of flat files are produced in IP:PORT format for highly-attackable services such as RDP, ssh, ftp and lots more!
+Handles the enumeration of large, internet-based networks at high speed. Uses masscan to quickly identify open ports, then calls nmap to gain details on the systems/services listening on those ports. 
+
+- Provides tons of handy flat files for importing into other tools: 
+  - `masscan` & `nmap` standard output files 
+  - Discovered domains and subdomains
+  - Highly-attackable services such as RDP, ssh, ftp
+- Provides sacreenshots of discovered web pages
+
+## FAQ
+
+### Don't `nmap` and `masscan` do the same thing? Why use both?
+
+Masscan, by nature of what makes it so fast, has a potential for losing packets and thus reporting false negatives during many scans. Thus, Masscan is used to identify which IP addresses have a listening host, then hands this full list off to Nmap. Nmap, on the other hand, is insanely slow when scanning massive networks which is why Masscan was created, so we use Masscan first to shrink the actual number of hosts to attempt to scan deeper. 
+
+### Doesn't $Tool[x] do all of this and more? Why use this one?
+
+While there is an ocean of tools for performing enumeration in this manner, everything wants to be the one-stop shop for attack surface and OSINT cataloging. This inevitably results in an AOL-level tool and interface that is good at a small number of things, but not great at the rest, and its output still requires a lot of annoying custom parsers to import into the better tools you want to use. This tool does a sparse few things, and outputs to universally-acceptaed flat files.
 
 ## Usage
 
-`$ scancannon.sh [Targets file . . .]`
+`$ scancannon.sh [CIDR range | Targets file] -u (Perform UDP scan on common ports (53, 161, 500) using nmap (very slow))`
 
 `Targets file` contains a line-separated list of CIDR networks, i.e.:
 
 `
-192.168.1.128/28
+192.0.1.128/16
 172.110.80.250/30
-12.16.8.45/32
+12.16.8.45/12
 172.0.0.0/8
 `
 
-Masscan arguments can be modified within scancannon.conf. DO NOT add arguments which are already present in the script itself; these are hard-coded for a reason and changing them will break stuff. Be aware that Masscan first reads from /etc/masscan/masscan.conf and overides it with anything provided in scancannon.conf, so make sure you don't have anything inappropriate in there.
-
-## CHANGES IN THIS VERSION
-
-HOLY CRAP I MADE A v1.0!! This is a near-complete re-write, with lots of effort put into reducing duplicate scans and processing, and adding POSIX compliance (Native MacOS support!!). Many more flat files are produced for your consumption, and it's very easy to have the script look for anything else you specifically need (see comments). 
+Masscan arguments can be modified within scancannon.conf. DO NOT add arguments that are already present in the script itself; these are hard-coded for a reason and changing them will break stuff. Be aware that Masscan first reads from its default conf file (usually /etc/masscan/masscan.conf) and overrides it with anything provided in scancannon.conf.
 
 ## Software Requirements
 
-* [Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
-* [nmap v7.0.1+](https://github.com/nmap/nmap)
-* Root \ sudo privs (for various low-level network stack stuff)
+- [Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)
+- [nmap v7.0.1+](https://github.com/nmap/nmap)
 
 ## WARNING
 
 It is VERY FEASIBLE to execute a Denial of Service against the target networks, even when launching from a single source. You should start with a very low masscan max-rate (5,000-10,000 kpps) and increase slowly to test. Even 10,000 kpps can take down some SOHO routers (Is it the new deauth attack?). On bare metal, pushing beyond 20,000 seems to increase the chances of missing responses from the target. 40,000 kpps has been known to DoS ESXi virtual switches (even on the source). ~200,000 is often enough to take out ISP equipment (but will probably literally melt your NIC first).
 
-## TO-DO
+## Known Issues
 
-* Root domain detection for International TLDs (Such as .co.uk) doesn't work too well due to InterNIC, etc not complying with ARIN standards. Need to fix this.
-* Tarpit detection
-* Perform OS detection on systems which were discovered by UDP scan but NOT masscan (to avoide double-scanning)
-* Add more customizability to scancannon.conf, such as ability to enable/disable certain scans
+- Domain detection for International TLDs (Such as .co.uk) doesn't work too well due to InterNIC, etc. not complying with ARIN standards.
 
 ## LICENSE
 
@@ -50,15 +58,15 @@ This project is released under the Creative Commons Attribution-NonCommercial 3.
 
 You are free to:
 
-* Share — copy and redistribute the material in any medium or format
-* Adapt — remix, transform, and build upon the material
-* The licensor cannot revoke these freedoms as long as you follow the license terms.
+- Share — copy and redistribute the material in any medium or format
+- Adapt — remix, transform, and build upon the material
+- The licensor cannot revoke these freedoms as long as you follow the license terms.
 
 Under the following terms:
 
-* [!]Attribution — You must give appropriate credit to all contributors to this project, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
+- [!]Attribution — You must give appropriate credit to all contributors to this project, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
 
-* [!]NonCommercial — You may not use the material for commercial purposes.
+- [!]NonCommercial — You may not use the material for commercial purposes.
 No additional restrictions — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
 
 Notices:
