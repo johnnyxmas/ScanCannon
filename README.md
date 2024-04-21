@@ -24,16 +24,11 @@ While there is an ocean of tools for performing enumeration in this manner, ever
 
 ## Usage
 
-`$ scancannon.sh [CIDR range | Targets file] -u (Perform UDP scan on common ports (53, 161, 500) using nmap (very slow))`
+`$ scancannon.sh [CIDR range | Targets file] -u 
 
-`Targets file` contains a line-separated list of CIDR networks, i.e.:
+`-u` Perform UDP scan on common ports (53, 161, 500) using nmap (very slow)
 
-`
-192.0.1.128/16
-172.110.80.250/30
-12.16.8.45/12
-172.0.0.0/8
-`
+`Targets file` contains a line-separated list of CIDR networks
 
 Masscan arguments can be modified within scancannon.conf. DO NOT add arguments that are already present in the script itself; these are hard-coded for a reason and changing them will break stuff. Be aware that Masscan first reads from its default conf file (usually /etc/masscan/masscan.conf) and overrides it with anything provided in scancannon.conf.
 
