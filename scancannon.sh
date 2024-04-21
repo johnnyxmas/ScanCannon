@@ -19,7 +19,7 @@ echo -e "••¤(×[¤ ScanCannon v1.0 by J0hnnyXm4s ¤]×)¤••\n"
 function helptext() {
 echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
 echo "usage: scancannon.sh [-u] [CIDR range | file containing line-separated CIDR ranges]"
-echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap"
+echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap (very slow)"
 }
 
 #Check if required tools are installed
