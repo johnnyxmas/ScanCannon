@@ -10,7 +10,6 @@ Handles the enumeration of large, internet-based networks at high speed. Uses ma
   - `masscan` & `nmap` standard output files 
   - Discovered domains and subdomains
   - Highly-attackable services such as RDP, ssh, ftp
-- Provides sacreenshots of discovered web pages
 
 ## FAQ
 
