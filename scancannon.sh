@@ -16,8 +16,16 @@ echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═�
 echo -e "••¤(×[¤ ScanCannon v1.0 by J0hnnyXm4s ¤]×)¤••\n"
 
 # Check for updates
-REMOTE_TIMESTAMP=$(curl -s -I https://raw.githubusercontent.com/johnnyxmas/ScanCannon/main/scancannon.sh | grep -i 'last-modified' | awk '{print $2, $3, $4, $5, $6}' | xargs -i date -d "{}" +%s)
+REMOTE_TIMESTAMP1=$(git log -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
 LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
+#Check if MacOS
+if [ "$(uname)" = "Darwin" ]; then
+MACOS=1
+REMOTE_TIMESTAMP=$(date -j -f "%a %d %b %Y %T" "$REMOTE_TIMESTAMP1" +%s)
+else
+MACOS=0
+REMOTE_TIMESTAMP=$(date -d "$REMOTE_TIMESTAMP1" +%s)
+fi
 
 if [[ "$REMOTE_TIMESTAMP" > "$LOCAL_TIMESTAMP" ]]; then
     read -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
@@ -89,13 +97,6 @@ if [ "$(id -u)" != "0" ]; then
 echo "ERROR: This script must be run as root"
 helptext >&2
 exit 1
-fi
-
-#Check if MacOS
-if [ "$(uname)" = "Darwin" ]; then
-MACOS=1
-else
-MACOS=0
 fi
 
 #Alert for existing Results files
