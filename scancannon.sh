@@ -16,7 +16,7 @@ echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═�
 echo -e "••¤(×[¤ ScanCannon v1.0 by J0hnnyXm4s ¤]×)¤••\n"
 
 # Check for updates
-REMOTE_TIMESTAMP1=$(git log -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
+REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
 LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
 #Check if MacOS
 if [ "$(uname)" = "Darwin" ]; then
