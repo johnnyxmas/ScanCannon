@@ -13,11 +13,11 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.0 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.2 by J0hnnyXm4s ¤]×)¤••\n"
 
 # Check for updates
 # Use the same branch name for checking and pulling
-REMOTE_TIMESTAMP1=$(git log origin/main -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
+REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
 LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
 #Check if MacOS
 if [ "$(uname)" = "Darwin" ]; then
@@ -32,7 +32,7 @@ if [[ "$REMOTE_TIMESTAMP" > "$LOCAL_TIMESTAMP" ]]; then
     read -r -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
     case "$update_choice" in
         y|Y )
-            if git pull origin main; then
+            if git pull origin master; then
                 echo "ScanCannon has been updated successfully."
             else
                 echo "Failed to update ScanCannon via git. Please manually download the latest version from https://github.com/johnnyxmas/ScanCannon/"
@@ -65,18 +65,193 @@ if [ ! -f "scancannon.conf" ]; then
     exit 1
 fi
 
-# Check if the configuration is compatible with the system
-if [ "$MACOS" -eq 1 ]; then
-    # Check if masscan config has adapter settings compatible with macOS
-    if grep -q "adapter =" "scancannon.conf" && ! ifconfig | grep -q "$(grep "adapter =" "scancannon.conf" | cut -d'=' -f2 | tr -d ' ')"; then
-        echo "WARNING: The network adapter in scancannon.conf may not exist on this system."
-        echo "Please verify your masscan configuration before continuing."
-        read -r -p "Continue anyway? [y/N]: " continue_choice
-        if [[ ! $continue_choice =~ ^[Yy]$ ]]; then
-            exit 1
+# Function to detect network interfaces
+function detect_interfaces() {
+    if [ "$MACOS" -eq 1 ]; then
+        # macOS interface detection
+        ifconfig | grep -E "^[a-z]" | grep -v "lo0" | awk -F: '{print $1}' | grep -E "^(en|eth|wlan)"
+    else
+        # Linux interface detection
+        ip link show | grep -E "^[0-9]+:" | grep -v "lo:" | awk -F: '{print $2}' | tr -d ' ' | grep -E "^(eth|ens|enp|wlan|wlp)"
+    fi
+}
+
+# Function to get interface details
+function get_interface_details() {
+    local interface="$1"
+    if [ "$MACOS" -eq 1 ]; then
+        # macOS
+        local ip=$(ifconfig "$interface" | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | head -1)
+        local mac=$(ifconfig "$interface" | grep "ether" | awk '{print $2}' | head -1)
+        echo "$ip|$mac"
+    else
+        # Linux
+        local ip=$(ip addr show "$interface" | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | cut -d'/' -f1 | head -1)
+        local mac=$(ip link show "$interface" | grep "link/ether" | awk '{print $2}' | head -1)
+        echo "$ip|$mac"
+    fi
+}
+
+# Function to detect default gateway
+function detect_gateways() {
+    if [ "$MACOS" -eq 1 ]; then
+        # macOS
+        netstat -rn | grep "default" | awk '{print $2}' | sort -u
+    else
+        # Linux
+        ip route | grep "default" | awk '{print $3}' | sort -u
+    fi
+}
+
+# Function to get gateway MAC
+function get_gateway_mac() {
+    local gateway_ip="$1"
+    if [ "$MACOS" -eq 1 ]; then
+        # macOS - ping first to populate ARP table
+        ping -c 1 "$gateway_ip" >/dev/null 2>&1
+        arp -n "$gateway_ip" 2>/dev/null | awk '{print $4}' | head -1
+    else
+        # Linux - ping first to populate ARP table
+        ping -c 1 "$gateway_ip" >/dev/null 2>&1
+        ip neigh show "$gateway_ip" 2>/dev/null | awk '{print $5}' | head -1
+    fi
+}
+
+# Function to configure network adapter settings
+function configure_adapter() {
+    echo ""
+    echo "=== Network Adapter Configuration ==="
+    echo "For optimal performance, ScanCannon can automatically configure your network adapter settings."
+    echo "This helps masscan achieve maximum scanning speed by bypassing the kernel network stack."
+    echo ""
+    read -r -p "Would you like to automatically configure network adapter settings? [y/N]: " auto_config
+    
+    if [[ ! $auto_config =~ ^[Yy]$ ]]; then
+        echo "Skipping automatic network configuration."
+        return
+    fi
+    
+    # Detect interfaces
+    echo "Detecting network interfaces..."
+    local interfaces=($(detect_interfaces))
+    
+    if [ ${#interfaces[@]} -eq 0 ]; then
+        echo "No suitable network interfaces found. Skipping automatic configuration."
+        return
+    fi
+    
+    local selected_interface=""
+    local selected_ip=""
+    local selected_mac=""
+    
+    if [ ${#interfaces[@]} -eq 1 ]; then
+        selected_interface="${interfaces[0]}"
+        echo "Found interface: $selected_interface"
+    else
+        echo "Multiple network interfaces found:"
+        for i in "${!interfaces[@]}"; do
+            local details=$(get_interface_details "${interfaces[$i]}")
+            local ip=$(echo "$details" | cut -d'|' -f1)
+            local mac=$(echo "$details" | cut -d'|' -f2)
+            echo "  [$((i+1))] ${interfaces[$i]} - IP: $ip, MAC: $mac"
+        done
+        echo ""
+        read -r -p "Select interface [1-${#interfaces[@]}]: " interface_choice
+        
+        if [[ "$interface_choice" =~ ^[0-9]+$ ]] && [ "$interface_choice" -ge 1 ] && [ "$interface_choice" -le ${#interfaces[@]} ]; then
+            selected_interface="${interfaces[$((interface_choice-1))]}"
+        else
+            echo "Invalid selection. Skipping automatic configuration."
+            return
         fi
     fi
-fi
+    
+    # Get interface details
+    local details=$(get_interface_details "$selected_interface")
+    selected_ip=$(echo "$details" | cut -d'|' -f1)
+    selected_mac=$(echo "$details" | cut -d'|' -f2)
+    
+    if [ -z "$selected_ip" ] || [ -z "$selected_mac" ]; then
+        echo "Could not determine IP or MAC for interface $selected_interface. Skipping automatic configuration."
+        return
+    fi
+    
+    echo "Selected interface: $selected_interface"
+    echo "  IP: $selected_ip"
+    echo "  MAC: $selected_mac"
+    
+    # Detect gateways
+    echo "Detecting default gateways..."
+    local gateways=($(detect_gateways))
+    
+    if [ ${#gateways[@]} -eq 0 ]; then
+        echo "No default gateway found. Skipping gateway configuration."
+        echo "You may need to manually configure router-mac in scancannon.conf"
+    else
+        local selected_gateway=""
+        local selected_gateway_mac=""
+        
+        if [ ${#gateways[@]} -eq 1 ]; then
+            selected_gateway="${gateways[0]}"
+            echo "Found gateway: $selected_gateway"
+        else
+            echo "Multiple gateways found:"
+            for i in "${!gateways[@]}"; do
+                echo "  [$((i+1))] ${gateways[$i]}"
+            done
+            echo ""
+            read -r -p "Select gateway [1-${#gateways[@]}]: " gateway_choice
+            
+            if [[ "$gateway_choice" =~ ^[0-9]+$ ]] && [ "$gateway_choice" -ge 1 ] && [ "$gateway_choice" -le ${#gateways[@]} ]; then
+                selected_gateway="${gateways[$((gateway_choice-1))]}"
+            else
+                echo "Invalid selection. Skipping gateway configuration."
+                selected_gateway=""
+            fi
+        fi
+        
+        if [ -n "$selected_gateway" ]; then
+            echo "Getting MAC address for gateway $selected_gateway..."
+            selected_gateway_mac=$(get_gateway_mac "$selected_gateway")
+            
+            if [ -n "$selected_gateway_mac" ]; then
+                echo "Gateway MAC: $selected_gateway_mac"
+            else
+                echo "Could not determine MAC for gateway $selected_gateway."
+                echo "You may need to manually configure router-mac in scancannon.conf"
+            fi
+        fi
+    fi
+    
+    # Update configuration file
+    echo ""
+    echo "Updating scancannon.conf with detected settings..."
+    
+    # Create backup
+    cp scancannon.conf scancannon.conf.bak
+    
+    # Remove existing adapter settings
+    sed -i.tmp '/^adapter-ip/d; /^adapter-mac/d; /^router-mac/d; /^# adapter-ip/d; /^# adapter-mac/d; /^# router-mac/d' scancannon.conf
+    
+    # Add new settings (convert MAC addresses from colon to dash format for masscan)
+    echo "" >> scancannon.conf
+    echo "# Auto-detected network adapter settings" >> scancannon.conf
+    echo "adapter-ip = $selected_ip" >> scancannon.conf
+    echo "adapter-mac = $(echo "$selected_mac" | tr ':' '-')" >> scancannon.conf
+    
+    if [ -n "$selected_gateway_mac" ]; then
+        echo "router-mac = $(echo "$selected_gateway_mac" | tr ':' '-')" >> scancannon.conf
+    else
+        echo "# router-mac = <gateway-mac-address>  # Could not auto-detect, configure manually if needed" >> scancannon.conf
+    fi
+    
+    echo "Configuration updated successfully!"
+    echo "Backup saved as scancannon.conf.bak"
+    echo ""
+}
+
+# Always offer network adapter configuration
+configure_adapter
 
 #Parse command line options
 UDP_SCAN=0
@@ -124,27 +299,86 @@ exit 1
 fi
 
 #Alert for existing Results files
-if [ -s "./results" ]; then
-read -p "Results folder exists. New results will be combined with existing. Re-scanning previous subnets will overwrite some files. Proceed?" -n 1 -r
+if [ -d "./results" ]; then
+echo "Results folder already exists."
+echo "Choose an option:"
+echo "  [D] Delete existing results and start fresh"
+echo "  [M] Merge new results with existing (re-scanning previous subnets will overwrite some files)"
+echo "  [C] Cancel and exit"
+read -p "Enter your choice [D/M/C]: " -n 1 -r choice
 echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-exit 1
-fi
+case "$choice" in
+    [Dd] )
+        echo "Deleting existing results folder..."
+        rm -rf "./results"
+        mkdir "results"
+        ;;
+    [Mm] )
+        echo "Merging with existing results. Re-scanning previous subnets will overwrite some files."
+        ;;
+    [Cc] )
+        echo "Operation cancelled."
+        exit 0
+        ;;
+    * )
+        echo "Invalid choice. Operation cancelled."
+        exit 1
+        ;;
+esac
 else
 mkdir "results"
 fi
 
-#Download and prep the lastest list of TLDs from IANA
-if [ -s "./all_tlds.txt" ]; then
-rm "./all_tlds.txt"
+#Download and prep the latest list of TLDs from IANA (only if older than 1 day)
+TLD_FILE="./all_tlds.txt"
+DOWNLOAD_TLD=false
+
+if [ ! -f "$TLD_FILE" ]; then
+    echo "TLD file not found. Downloading..."
+    DOWNLOAD_TLD=true
+else
+    # Check if file is older than 1 day (86400 seconds)
+    if [ "$MACOS" -eq 1 ]; then
+        # macOS
+        FILE_AGE=$(stat -f %m "$TLD_FILE")
+        CURRENT_TIME=$(date +%s)
+    else
+        # Linux
+        FILE_AGE=$(stat -c %Y "$TLD_FILE")
+        CURRENT_TIME=$(date +%s)
+    fi
+    
+    AGE_DIFF=$((CURRENT_TIME - FILE_AGE))
+    if [ $AGE_DIFF -gt 86400 ]; then
+        echo "TLD file is older than 1 day. Updating..."
+        DOWNLOAD_TLD=true
+    else
+        echo "TLD file is recent (less than 1 day old). Using existing file."
+    fi
 fi
-if ! wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O "./all_tlds.txt"; then
-echo "ERROR: Failed to download TLD list. Please check your internet connection and try again."
-exit 1
+
+if [ "$DOWNLOAD_TLD" = true ]; then
+    if ! wget https://data.iana.org/TLD/tlds-alpha-by-domain.txt -O "$TLD_FILE"; then
+        echo "ERROR: Failed to download TLD list. Please check your internet connection and try again."
+        if [ ! -f "$TLD_FILE" ]; then
+            echo "No existing TLD file found. Cannot continue without TLD list."
+            exit 1
+        else
+            echo "Using existing TLD file despite download failure."
+        fi
+    else
+        # Process the downloaded file
+        # Handle macOS BSD sed vs GNU sed differences
+        if [ "$MACOS" -eq 1 ]; then
+            sed -i '' '1d' "$TLD_FILE"
+            sed -i '' 's/^/[.]/g' "$TLD_FILE"
+        else
+            sed -i '1d' "$TLD_FILE"
+            sed -i 's/^/[.]/g' "$TLD_FILE"
+        fi
+        echo "TLD file updated and processed successfully."
+    fi
 fi
-# Replace vi with sed for better compatibility
-sed -i '1d' "all_tlds.txt"
-sed -i 's/^/[.]/g' "all_tlds.txt"
 
 #Prep packet filter for masscan. If you are using something else, you MUST do this manually.
 if [ "$MACOS" != 1 ]; then
@@ -168,6 +402,25 @@ fi
 TOTAL_IPS=0
 RESPONSIVE_IPS=0
 DISCOVERED_SERVICES=0
+
+#Housekeeping function (defined early so it can be called by ctrl_c)
+function cleanup() {
+echo -e "\nPerforming cleanup. . . "
+# Check if paused.conf exists before removing
+if [ -f ./paused.conf ]; then
+    rm ./paused.conf
+fi
+for DIRECTORY in ./results/*/; do
+    # Create directories before moving files
+    mkdir -p "${DIRECTORY}nmap_files" "${DIRECTORY}gnmap_files" "${DIRECTORY}nmap_xml_files"
+    # Use quotes to handle spaces in filenames
+    mv -f "${DIRECTORY}"*.nmap "${DIRECTORY}nmap_files/" 2>/dev/null
+    mv -f "${DIRECTORY}"*.gnmap "${DIRECTORY}gnmap_files/" 2>/dev/null
+    mv -f "${DIRECTORY}"*.xml "${DIRECTORY}nmap_xml_files/" 2>/dev/null
+rm -rf "./results/all_interesting_servers/"*_files 2>/dev/null
+done
+chmod -R 776 "./results"
+}
 
 # Handle Ctrl+C
 function ctrl_c() {
@@ -311,24 +564,6 @@ find ./results -type d -name "*_*" | while read -r dir; do
     fi
 done
 
-#Housekeeping
-function cleanup() {
-echo -e "\nPerforming cleanup. . . "
-# Check if paused.conf exists before removing
-if [ -f ./paused.conf ]; then
-    rm ./paused.conf
-fi
-for DIRECTORY in ./results/*/; do
-    # Create directories before moving files
-    mkdir -p "${DIRECTORY}nmap_files" "${DIRECTORY}gnmap_files" "${DIRECTORY}nmap_xml_files"
-    # Use quotes to handle spaces in filenames
-    mv -f "${DIRECTORY}"*.nmap "${DIRECTORY}nmap_files/" 2>/dev/null
-    mv -f "${DIRECTORY}"*.gnmap "${DIRECTORY}gnmap_files/" 2>/dev/null
-    mv -f "${DIRECTORY}"*.xml "${DIRECTORY}nmap_xml_files/" 2>/dev/null
-rm -rf "./results/all_interesting_servers/"*_files 2>/dev/null
-done
-chmod -R 776 "./results"
-}
 
 #Print summary
 echo -e "\nScan Summary:"
