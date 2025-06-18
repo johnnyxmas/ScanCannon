@@ -80,7 +80,6 @@ ScanCannon focuses on these high-value services for security assessment:
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt update
 sudo apt install masscan nmap dnsutils whois wget
 ```
 
@@ -107,12 +106,6 @@ brew install masscan nmap wget
 2. **Make the script executable:**
    ```bash
    chmod +x scancannon.sh
-   ```
-
-3. **Verify prerequisites:**
-   ```bash
-   # The script will automatically check for required tools
-   sudo ./scancannon.sh
    ```
 
 ## Quick Start

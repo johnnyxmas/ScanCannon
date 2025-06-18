@@ -4,3 +4,6 @@ paused.conf
 cidr.txt
 results/
 scancannon.log
+scancannon.conf.tmp
+scancannon.conf.bak
+scancannon.log
