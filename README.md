@@ -1,4 +1,4 @@
-# ScanCannon v1.2
+# ScanCannon v1.3
 
 ![scancannon](https://i.imgur.com/FUvPADq.png)
 
@@ -80,6 +80,7 @@ ScanCannon focuses on these high-value services for security assessment:
 
 **Ubuntu/Debian:**
 ```bash
+sudo apt update
 sudo apt install masscan nmap dnsutils whois wget
 ```
 
@@ -106,6 +107,12 @@ brew install masscan nmap wget
 2. **Make the script executable:**
    ```bash
    chmod +x scancannon.sh
+   ```
+
+3. **Verify prerequisites:**
+   ```bash
+   # The script will automatically check for required tools
+   sudo ./scancannon.sh
    ```
 
 ## Quick Start
@@ -440,6 +447,6 @@ For the full license text, see [LICENSE](LICENSE).
 
 ---
 
-**ScanCannon v1.2 by J0hnnyXm4s**
+**ScanCannon v1.3 by J0hnnyXm4s**
 
 *"Efficient enumeration of massive Internet network ranges"*

@@ -13,7 +13,7 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.2 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.3 by J0hnnyXm4s ¤]×)¤••\n"
 
 # Check for updates
 # Use the same branch name for checking and pulling
@@ -278,12 +278,24 @@ fi
 
 #Check if the argument is a valid CIDR range or a file
 if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$'; then
-CIDR_RANGES=("$1")
+# Add /32 if no CIDR notation is present
+if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    CIDR_RANGES=("$1/32")
+else
+    CIDR_RANGES=("$1")
+fi
 elif [ -s "$1" ]; then
 # Replace readarray with a more compatible approach
 CIDR_RANGES=()
 while IFS= read -r line; do
-    [[ -n "$line" ]] && CIDR_RANGES+=("$line")
+    if [[ -n "$line" ]]; then
+        # Add /32 if no CIDR notation is present for each line
+        if echo "$line" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            CIDR_RANGES+=("$line/32")
+        else
+            CIDR_RANGES+=("$line")
+        fi
+    fi
 done < "$1"
 else
 echo "ERROR: Invalid CIDR range or file."
@@ -413,10 +425,16 @@ fi
 for DIRECTORY in ./results/*/; do
     # Create directories before moving files
     mkdir -p "${DIRECTORY}nmap_files" "${DIRECTORY}gnmap_files" "${DIRECTORY}nmap_xml_files"
-    # Use quotes to handle spaces in filenames
-    mv -f "${DIRECTORY}"*.nmap "${DIRECTORY}nmap_files/" 2>/dev/null
-    mv -f "${DIRECTORY}"*.gnmap "${DIRECTORY}gnmap_files/" 2>/dev/null
-    mv -f "${DIRECTORY}"*.xml "${DIRECTORY}nmap_xml_files/" 2>/dev/null
+    # Use quotes to handle spaces in filenames and check file existence
+    if ls "${DIRECTORY}"*.nmap >/dev/null 2>&1; then
+        mv -f "${DIRECTORY}"*.nmap "${DIRECTORY}nmap_files/" 2>/dev/null
+    fi
+    if ls "${DIRECTORY}"*.gnmap >/dev/null 2>&1; then
+        mv -f "${DIRECTORY}"*.gnmap "${DIRECTORY}gnmap_files/" 2>/dev/null
+    fi
+    if ls "${DIRECTORY}"*.xml >/dev/null 2>&1; then
+        mv -f "${DIRECTORY}"*.xml "${DIRECTORY}nmap_xml_files/" 2>/dev/null
+    fi
 rm -rf "./results/all_interesting_servers/"*_files 2>/dev/null
 done
 chmod -R 776 "./results"
@@ -505,12 +523,14 @@ mkdir -p "./results/${DIRNAME}/interesting_servers/"
 mkdir -p "./results/all_interesting_servers/"
 #(if you add to this service list, make sure you also add it to the master file generation list at the end.)
 for SERVICE in domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https; do
-    # Improved service detection to handle multiple matches
-    if grep -h -o -E "$SERVICE/.+/.+[0-9]+/open/.+/$SERVICE" "./results/${DIRNAME}"/*.gnmap > /dev/null 2>&1; then
-        # Process each match individually
-        grep -h -o -E "$SERVICE/.+/.+[0-9]+/open/.+/$SERVICE" "./results/${DIRNAME}"/*.gnmap | while read -r RESULT; do
-            SERVIP="$(echo "$RESULT" | awk -F" " '{print $2}')"
-            SERVPORT="$(echo "$RESULT" | awk -F"/" '{print $3}')"
+    # Check if gnmap files exist before processing
+    if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
+        # Improved service detection with correct gnmap parsing
+        grep -h "$SERVICE" "./results/${DIRNAME}"/*.gnmap | grep "open" | while read -r LINE; do
+            # Extract IP from the beginning of the line
+            SERVIP="$(echo "$LINE" | awk '{print $2}')"
+            # Extract port from the ports section - look for pattern like "80/open/tcp//http///"
+            SERVPORT="$(echo "$LINE" | grep -o '[0-9]*/open/[^/]*/[^/]*'"$SERVICE" | cut -d'/' -f1)"
             
             if [ -n "$SERVIP" ] && [ -n "$SERVPORT" ]; then
                 echo "$SERVIP":"$SERVPORT" | tee -a "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" >>"./results/all_interesting_servers/all_${SERVICE}_servers.txt"
@@ -522,27 +542,39 @@ done
 
 #Generate list of discovered sub/domains for this subnet.
 echo "Root Domain,IP,CIDR,AS#,IP Owner" | tee "./results/${DIRNAME}/resolved_root_domains.csv" >>"./results/all_root_domains.csv"
-while read -r TLD; do
-    grep -E -i "$TLD" "./results/${DIRNAME}"/*.gnmap | awk -F[\(\)] '{print $2}' | sort -u | tee "./results/${DIRNAME}/resolved_subdomains.txt" >>"./results/all_subdomains.txt"
-done <"./all_tlds.txt"
-while read -r DOMAIN; do
-    DIG="$(dig "$DOMAIN" +short)"
-    if [ -n "$DIG" ]; then
-        # More robust whois parsing
-        WHOIS="$(whois "$DIG" | awk -F':[ ]*' '
-                /CIDR:/ { cidr = $2 };
-                /Organization:/ { org = $2 };
-                /OriginAS:/ { asn = $2 }
-                END {
-                    if (cidr != "" || asn != "" || org != "") {
-                        printf "%s,%s,%s", cidr, asn, org
-                    } else {
-                        print "N/A,N/A,N/A"
-                    }
-                }')"
-        echo "$DOMAIN"",""$DIG"",""$WHOIS" | tee -a "./results/${DIRNAME}/resolved_root_domains.csv" >>"./results/all_root_domains.csv"
-    fi
-done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt")
+# Check if TLD file exists and has content, and if gnmap files exist
+if [ -s "./all_tlds.txt" ] && ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
+    while read -r TLD; do
+        # Skip empty lines and comments
+        if [[ -n "$TLD" && ! "$TLD" =~ ^# ]]; then
+            grep -E -i "$TLD" "./results/${DIRNAME}"/*.gnmap | awk -F[\(\)] '{print $2}' | sort -u | tee "./results/${DIRNAME}/resolved_subdomains.txt" >>"./results/all_subdomains.txt"
+        fi
+    done <"./all_tlds.txt"
+else
+    # Create empty files if TLD processing can't be done
+    touch "./results/${DIRNAME}/resolved_subdomains.txt"
+fi
+# Only process domains if subdomain file exists and has content
+if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
+    while read -r DOMAIN; do
+        DIG="$(dig "$DOMAIN" +short)"
+        if [ -n "$DIG" ]; then
+            # More robust whois parsing
+            WHOIS="$(whois "$DIG" | awk -F':[ ]*' '
+                    /CIDR:/ { cidr = $2 };
+                    /Organization:/ { org = $2 };
+                    /OriginAS:/ { asn = $2 }
+                    END {
+                        if (cidr != "" || asn != "" || org != "") {
+                            printf "%s,%s,%s", cidr, asn, org
+                        } else {
+                            print "N/A,N/A,N/A"
+                        }
+                    }')"
+            echo "$DOMAIN"",""$DIG"",""$WHOIS" | tee -a "./results/${DIRNAME}/resolved_root_domains.csv" >>"./results/all_root_domains.csv"
+        fi
+    done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt")
+fi
 done
 
 #Restore packet filter backup
@@ -557,8 +589,12 @@ fi
 #Report unresponsive networks:
 # Improved unresponsive networks detection
 echo "Identifying unresponsive networks..."
-find ./results -type d -name "*_*" | while read -r dir; do
+find ./results -maxdepth 1 -type d -name "*_*" | while read -r dir; do
     dirname=$(basename "$dir")
+    # Skip special directories like interesting_servers, all_interesting_servers, etc.
+    if [[ "$dirname" == *"interesting"* ]] || [[ "$dirname" == "all_"* ]]; then
+        continue
+    fi
     if [ ! -f "$dir/hosts_and_ports.txt" ]; then
         echo "$dirname" | sed 's/_/\//g' >> "./results/dead_networks.txt"
     fi
