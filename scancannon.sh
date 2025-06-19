@@ -28,7 +28,7 @@ MACOS=0
 REMOTE_TIMESTAMP=$(date -d "$REMOTE_TIMESTAMP1" +%s)
 fi
 
-if [[ "$REMOTE_TIMESTAMP" > "$LOCAL_TIMESTAMP" ]]; then
+if [[ "$REMOTE_TIMESTAMP" -gt "$LOCAL_TIMESTAMP" ]]; then
     read -r -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
     case "$update_choice" in
         y|Y )
