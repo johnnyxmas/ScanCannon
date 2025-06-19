@@ -2,9 +2,9 @@
 
 ![scancannon](https://i.imgur.com/FUvPADq.png)
 
-**A Bash script for efficient enumeration of massive Internet network ranges.**
+**A Bash script for efficient credential attack surface enumeration of massive network ranges.**
 
-ScanCannon handles the enumeration of large, internet-based networks at high speed. It uses masscan to quickly identify open ports, then calls nmap to gain detailed information on the systems and services listening on those ports.
+ScanCannon handles the enumeration of extremely large networks (such as The Internet) at as high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
 
 ## Table of Contents
 
@@ -29,24 +29,17 @@ ScanCannon handles the enumeration of large, internet-based networks at high spe
 - **Detailed service detection** using nmap for discovered hosts
 - **Comprehensive output formats** including flat files for easy import into other tools
 - **Automatic domain/subdomain discovery** from scan results
-- **Service categorization** for common attack vectors (SSH, FTP, HTTP, SMB, etc.)
+- **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.)
 - **Progress tracking** with real-time scan status
 - **Automatic cleanup** and file organization
 - **Cross-platform support** (Linux and macOS)
-
-### How It Works
-
-1. **Fast Discovery**: Masscan quickly scans target networks to find responsive hosts
-2. **Detailed Analysis**: Nmap performs in-depth service detection on discovered hosts
-3. **Smart Categorization**: Results are automatically sorted by service type
-4. **Domain Discovery**: Extracts and resolves domain names from scan results
-5. **Efficient Updates**: Only downloads TLD list when needed (older than 1 day)
 
 ### Target Services
 
 ScanCannon focuses on these high-value services for security assessment:
 
 **TCP Services:**
+
 - **21** - FTP (File Transfer Protocol)
 - **22** - SSH (Secure Shell)
 - **23** - Telnet
@@ -61,6 +54,7 @@ ScanCannon focuses on these high-value services for security assessment:
 - **1723** - PPTP (Point-to-Point Tunneling Protocol)
 
 **UDP Services (with -u flag):**
+
 - **53** - DNS (Domain Name System)
 - **161** - SNMP (Simple Network Management Protocol)
 - **500** - ISAKMP (Internet Security Association and Key Management Protocol)
@@ -425,9 +419,7 @@ ScanCannon currently focuses on IPv4 networks. For IPv6 scanning, use nmap direc
 
 ## Known Issues
 
-- **International TLD Detection**: Domain detection for international TLDs (like .co.uk) may not work reliably due to varying WHOIS standards
-- **macOS Compatibility**: Some network adapter configurations may require manual adjustment on macOS
-- **Large Network Memory**: Very large networks (>/16) may consume significant memory during processing
+- **International TLD Detection**: Domain detection for international TLDs (like .co.uk, .io, etc.) may not work reliably due to varying WHOIS output standards
 
 ## License
 
@@ -449,4 +441,4 @@ For the full license text, see [LICENSE](LICENSE).
 
 **ScanCannon v1.3 by J0hnnyXm4s**
 
-*"Efficient enumeration of massive Internet network ranges"*
+*"Efficient credential attack surface enumeration of massive network ranges"*
