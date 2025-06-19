@@ -51,6 +51,83 @@ echo "usage: scancannon.sh [-u] [CIDR range | file containing line-separated CID
 echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap"
 }
 
+# Function to validate CIDR notation
+function validate_cidr() {
+    local cidr="$1"
+    local line_num="$2"
+    local file_name="$3"
+    
+    # Skip empty lines and comments
+    if [[ -z "$cidr" || "$cidr" =~ ^[[:space:]]*# ]]; then
+        return 0
+    fi
+    
+    # Check for valid IP address format (with or without CIDR)
+    if echo "$cidr" | grep -qE '^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?[[:space:]]*$'; then
+        # Extract IP and CIDR parts
+        local ip_part=$(echo "$cidr" | sed 's|/.*||' | tr -d '[:space:]')
+        local cidr_part=$(echo "$cidr" | grep -o '/[0-9]*' | tr -d '/')
+        
+        # Validate each octet of IP address
+        IFS='.' read -ra OCTETS <<< "$ip_part"
+        if [ ${#OCTETS[@]} -ne 4 ]; then
+            echo "ERROR: Invalid IP address format '$cidr' in $file_name at line $line_num"
+            return 1
+        fi
+        
+        for octet in "${OCTETS[@]}"; do
+            if [[ ! "$octet" =~ ^[0-9]+$ ]] || [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+                echo "ERROR: Invalid IP octet '$octet' in '$cidr' in $file_name at line $line_num"
+                return 1
+            fi
+        done
+        
+        # Validate CIDR notation if present
+        if [[ -n "$cidr_part" ]]; then
+            if [ "$cidr_part" -lt 0 ] || [ "$cidr_part" -gt 32 ]; then
+                echo "ERROR: Invalid CIDR notation '/$cidr_part' in '$cidr' in $file_name at line $line_num"
+                return 1
+            fi
+        fi
+        
+        return 0
+    else
+        echo "ERROR: Invalid CIDR format '$cidr' in $file_name at line $line_num"
+        echo "Expected format: x.x.x.x or x.x.x.x/y (where x is 0-255 and y is 0-32)"
+        return 1
+    fi
+}
+
+# Function to validate exclude file
+function validate_exclude_file() {
+    local exclude_file="exclude.txt"
+    
+    if [ ! -f "$exclude_file" ]; then
+        echo "WARNING: Exclude file '$exclude_file' not found. Continuing without exclusions."
+        return 0
+    fi
+    
+    echo "Validating exclude file: $exclude_file"
+    local line_num=0
+    local errors=0
+    
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        if ! validate_cidr "$line" "$line_num" "$exclude_file"; then
+            errors=$((errors + 1))
+        fi
+    done < "$exclude_file"
+    
+    if [ $errors -gt 0 ]; then
+        echo "ERROR: Found $errors validation error(s) in $exclude_file"
+        echo "Please fix the errors and try again."
+        return 1
+    fi
+    
+    echo "Exclude file validation passed."
+    return 0
+}
+
 #Check if required tools are installed
 for tool in masscan nmap dig whois; do
 if ! command -v "$tool" >/dev/null 2>&1; then
@@ -276,27 +353,66 @@ helptext >&2
 exit 1
 fi
 
+# Validate exclude file first
+if ! validate_exclude_file; then
+    exit 1
+fi
+
 #Check if the argument is a valid CIDR range or a file
 if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$'; then
-# Add /32 if no CIDR notation is present
-if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-    CIDR_RANGES=("$1/32")
-else
-    CIDR_RANGES=("$1")
-fi
-elif [ -s "$1" ]; then
-# Replace readarray with a more compatible approach
-CIDR_RANGES=()
-while IFS= read -r line; do
-    if [[ -n "$line" ]]; then
-        # Add /32 if no CIDR notation is present for each line
-        if echo "$line" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-            CIDR_RANGES+=("$line/32")
+    # Validate single CIDR range
+    if validate_cidr "$1" "1" "command line argument"; then
+        # Add /32 if no CIDR notation is present
+        if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            CIDR_RANGES=("$1/32")
         else
-            CIDR_RANGES+=("$line")
+            CIDR_RANGES=("$1")
         fi
+    else
+        exit 1
     fi
-done < "$1"
+elif [ -s "$1" ]; then
+    echo "Validating CIDR ranges in file: $1"
+    # Validate file contents first
+    line_num=0
+    errors=0
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        if ! validate_cidr "$line" "$line_num" "$1"; then
+            errors=$((errors + 1))
+        fi
+    done < "$1"
+    
+    if [ $errors -gt 0 ]; then
+        echo "ERROR: Found $errors validation error(s) in $1"
+        echo "Please fix the errors and try again."
+        exit 1
+    fi
+    
+    echo "Input file validation passed."
+    
+    # Process validated file
+    CIDR_RANGES=()
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
+            # Clean up whitespace
+            line=$(echo "$line" | tr -d '[:space:]')
+            # Add /32 if no CIDR notation is present for each line
+            if echo "$line" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                CIDR_RANGES+=("$line/32")
+            else
+                CIDR_RANGES+=("$line")
+            fi
+        fi
+    done < "$1"
+    
+    if [ ${#CIDR_RANGES[@]} -eq 0 ]; then
+        echo "ERROR: No valid CIDR ranges found in $1"
+        exit 1
+    fi
+    
+    echo "Loaded ${#CIDR_RANGES[@]} valid CIDR range(s) from $1"
 else
 echo "ERROR: Invalid CIDR range or file."
 helptext >&2
