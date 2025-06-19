@@ -62,40 +62,45 @@ function validate_cidr() {
         return 0
     fi
     
-    # Check for valid IP address format (with or without CIDR)
-    if echo "$cidr" | grep -qE '^[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?[[:space:]]*$'; then
-        # Extract IP and CIDR parts
-        local ip_part=$(echo "$cidr" | sed 's|/.*||' | tr -d '[:space:]')
-        local cidr_part=$(echo "$cidr" | grep -o '/[0-9]*' | tr -d '/')
+    # Single awk call for comprehensive validation
+    echo "$cidr" | awk -v line_num="$line_num" -v file_name="$file_name" '
+    {
+        # Remove leading/trailing whitespace
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
         
-        # Validate each octet of IP address
-        IFS='.' read -ra OCTETS <<< "$ip_part"
-        if [ ${#OCTETS[@]} -ne 4 ]; then
-            echo "ERROR: Invalid IP address format '$cidr' in $file_name at line $line_num"
-            return 1
-        fi
-        
-        for octet in "${OCTETS[@]}"; do
-            if [[ ! "$octet" =~ ^[0-9]+$ ]] || [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
-                echo "ERROR: Invalid IP octet '$octet' in '$cidr' in $file_name at line $line_num"
-                return 1
-            fi
-        done
-        
-        # Validate CIDR notation if present
-        if [[ -n "$cidr_part" ]]; then
-            if [ "$cidr_part" -lt 0 ] || [ "$cidr_part" -gt 32 ]; then
-                echo "ERROR: Invalid CIDR notation '/$cidr_part' in '$cidr' in $file_name at line $line_num"
-                return 1
-            fi
-        fi
-        
-        return 0
-    else
-        echo "ERROR: Invalid CIDR format '$cidr' in $file_name at line $line_num"
-        echo "Expected format: x.x.x.x or x.x.x.x/y (where x is 0-255 and y is 0-32)"
-        return 1
-    fi
+        # Split IP and CIDR parts
+        if (match($0, /^([0-9]{1,3}\.){3}[0-9]{1,3}(\/[0-9]+)?$/)) {
+            split($0, parts, "/")
+            ip = parts[1]
+            cidr = parts[2]
+            
+            # Validate IP octets
+            split(ip, octets, ".")
+            if (length(octets) != 4) {
+                print "ERROR: Invalid IP address format '\''" $0 "'\'' in " file_name " at line " line_num
+                exit 1
+            }
+            
+            for (i in octets) {
+                if (octets[i] < 0 || octets[i] > 255 || octets[i] !~ /^[0-9]+$/) {
+                    print "ERROR: Invalid IP octet '\''" octets[i] "'\'' in '\''" $0 "'\'' in " file_name " at line " line_num
+                    exit 1
+                }
+            }
+            
+            # Validate CIDR if present
+            if (cidr != "" && (cidr < 0 || cidr > 32)) {
+                print "ERROR: Invalid CIDR notation '\''/" cidr "'\'' in '\''" $0 "'\'' in " file_name " at line " line_num
+                exit 1
+            }
+            
+            exit 0
+        } else {
+            print "ERROR: Invalid CIDR format '\''" $0 "'\'' in " file_name " at line " line_num
+            print "Expected format: x.x.x.x or x.x.x.x/y (where x is 0-255 and y is 0-32)"
+            exit 1
+        }
+    }'
 }
 
 # Function to validate exclude file
@@ -145,11 +150,11 @@ fi
 # Function to detect network interfaces
 function detect_interfaces() {
     if [ "$MACOS" -eq 1 ]; then
-        # macOS interface detection
-        ifconfig | grep -E "^[a-z]" | grep -v "lo0" | awk -F: '{print $1}' | grep -E "^(en|eth|wlan)"
+        # macOS interface detection - optimized single awk call
+        ifconfig | awk -F: '/^[a-z]/ && !/lo0/ && /^(en|eth|wlan)/ {print $1}'
     else
-        # Linux interface detection
-        ip link show | grep -E "^[0-9]+:" | grep -v "lo:" | awk -F: '{print $2}' | tr -d ' ' | grep -E "^(eth|ens|enp|wlan|wlp)"
+        # Linux interface detection - optimized single awk call
+        ip link show | awk -F: '/^[0-9]+:/ && !/lo:/ {gsub(/ /, "", $2); if ($2 ~ /^(eth|ens|enp|wlan|wlp)/) print $2}'
     fi
 }
 
@@ -157,15 +162,18 @@ function detect_interfaces() {
 function get_interface_details() {
     local interface="$1"
     if [ "$MACOS" -eq 1 ]; then
-        # macOS
-        local ip=$(ifconfig "$interface" | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | head -1)
-        local mac=$(ifconfig "$interface" | grep "ether" | awk '{print $2}' | head -1)
-        echo "$ip|$mac"
+        # macOS - single ifconfig call with awk processing
+        ifconfig "$interface" | awk '
+            /inet / && !/127.0.0.1/ && !ip {ip = $2}
+            /ether/ && !mac {mac = $2}
+            END {print ip "|" mac}
+        '
     else
-        # Linux
-        local ip=$(ip addr show "$interface" | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | cut -d'/' -f1 | head -1)
-        local mac=$(ip link show "$interface" | grep "link/ether" | awk '{print $2}' | head -1)
-        echo "$ip|$mac"
+        # Linux - optimized with single command and awk processing
+        {
+            ip addr show "$interface" | awk '/inet / && !/127.0.0.1/ {gsub(/\/.*/, "", $2); print $2; exit}'
+            ip link show "$interface" | awk '/link\/ether/ {print $2; exit}'
+        } | paste -sd'|'
     fi
 }
 
@@ -638,41 +646,82 @@ echo -ne "\rProgress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n
 mkdir -p "./results/${DIRNAME}/interesting_servers/"
 mkdir -p "./results/all_interesting_servers/"
 #(if you add to this service list, make sure you also add it to the master file generation list at the end.)
-for SERVICE in domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https; do
-    # Check if gnmap files exist before processing
-    if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-        # Improved service detection with correct gnmap parsing
-        grep -h "$SERVICE" "./results/${DIRNAME}"/*.gnmap | grep "open" | while read -r LINE; do
-            # Extract IP from the beginning of the line
-            SERVIP="$(echo "$LINE" | awk '{print $2}')"
-            # Extract port from the ports section - look for pattern like "80/open/tcp//http///"
-            SERVPORT="$(echo "$LINE" | grep -o '[0-9]*/open/[^/]*/[^/]*'"$SERVICE" | cut -d'/' -f1)"
-            
-            if [ -n "$SERVIP" ] && [ -n "$SERVPORT" ]; then
-                echo "$SERVIP":"$SERVPORT" | tee -a "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" >>"./results/all_interesting_servers/all_${SERVICE}_servers.txt"
-                DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + 1))
-            fi
-        done
-    fi
-done
+# Check if gnmap files exist before processing all services
+if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
+    # Process all services in a single pass through gnmap files for efficiency
+    for SERVICE in domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https; do
+        # Optimized service detection with single awk call
+        awk -v service="$SERVICE" '
+            /open/ && $0 ~ service {
+                ip = $2
+                # Extract port from the ports section
+                for (i = 3; i <= NF; i++) {
+                    if ($i ~ "[0-9]+/open/[^/]*/[^/]*" service) {
+                        split($i, port_parts, "/")
+                        if (port_parts[1] && ip) {
+                            print ip ":" port_parts[1]
+                        }
+                    }
+                }
+            }
+        ' "./results/${DIRNAME}"/*.gnmap > "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt"
+        
+        # Only append to global file if local file has content
+        if [ -s "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" ]; then
+            cat "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" >> "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+            DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + $(wc -l < "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt")))
+        fi
+    done
+fi
 
 #Generate list of discovered sub/domains for this subnet.
-echo "Root Domain,IP,CIDR,AS#,IP Owner" | tee "./results/${DIRNAME}/resolved_root_domains.csv" >>"./results/all_root_domains.csv"
+echo "Root Domain,IP,CIDR,AS#,IP Owner" > "./results/${DIRNAME}/resolved_root_domains.csv"
+echo "Root Domain,IP,CIDR,AS#,IP Owner" >> "./results/all_root_domains.csv"
+
 # Check if TLD file exists and has content, and if gnmap files exist
 if [ -s "./all_tlds.txt" ] && ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-    while read -r TLD; do
-        # Skip empty lines and comments
-        if [[ -n "$TLD" && ! "$TLD" =~ ^# ]]; then
-            grep -E -i "$TLD" "./results/${DIRNAME}"/*.gnmap | awk -F[\(\)] '{print $2}' | sort -u | tee "./results/${DIRNAME}/resolved_subdomains.txt" >>"./results/all_subdomains.txt"
-        fi
-    done <"./all_tlds.txt"
+    # Optimized domain extraction with single awk pass
+    awk -F'[()]' '
+        BEGIN {
+            # Read TLD patterns
+            while ((getline tld < "./all_tlds.txt") > 0) {
+                if (tld !~ /^#/ && tld != "") {
+                    tlds[tolower(tld)] = 1
+                }
+            }
+            close("./all_tlds.txt")
+        }
+        {
+            if ($2) {
+                domain = tolower($2)
+                for (tld in tlds) {
+                    if (domain ~ tld) {
+                        domains[domain] = 1
+                        break
+                    }
+                }
+            }
+        }
+        END {
+            for (domain in domains) {
+                print domain
+            }
+        }
+    ' "./results/${DIRNAME}"/*.gnmap | sort -u > "./results/${DIRNAME}/resolved_subdomains.txt"
+    
+    # Append to global file
+    cat "./results/${DIRNAME}/resolved_subdomains.txt" >> "./results/all_subdomains.txt"
 else
     # Create empty files if TLD processing can't be done
     touch "./results/${DIRNAME}/resolved_subdomains.txt"
 fi
 # Only process domains if subdomain file exists and has content
 if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
-    while read -r DOMAIN; do
+    # Create temporary file for batch processing
+    temp_domains=$(mktemp)
+    
+    # Extract root domains and process in batch
+    awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt" | sort -u | while read -r DOMAIN; do
         DIG="$(dig "$DOMAIN" +short)"
         if [ -n "$DIG" ]; then
             # More robust whois parsing
@@ -687,9 +736,17 @@ if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
                             print "N/A,N/A,N/A"
                         }
                     }')"
-            echo "$DOMAIN"",""$DIG"",""$WHOIS" | tee -a "./results/${DIRNAME}/resolved_root_domains.csv" >>"./results/all_root_domains.csv"
+            echo "$DOMAIN,$DIG,$WHOIS" >> "$temp_domains"
         fi
-    done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt")
+    done
+    
+    # Append batch results to both files
+    if [ -s "$temp_domains" ]; then
+        cat "$temp_domains" >> "./results/${DIRNAME}/resolved_root_domains.csv"
+        cat "$temp_domains" >> "./results/all_root_domains.csv"
+    fi
+    
+    rm -f "$temp_domains"
 fi
 done
 
