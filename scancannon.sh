@@ -15,6 +15,99 @@ echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═�
 
 echo -e "••¤(×[¤ ScanCannon v1.3 by J0hnnyXm4s ¤]×)¤••\n"
 
+# ===== PROGRESS TRACKING SYSTEM =====
+
+# Progress tracking variables
+PROGRESS_FILE="./scancannon_progress.tmp"
+SCRIPT_START_TIME=$(date +%s)
+TOTAL_PHASES=0
+CURRENT_PHASE=0
+SPINNER_CHARS="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_INDEX=0
+declare -A PHASE_TIMES
+
+# Calculate total phases upfront
+calculate_total_phases() {
+    local phases=5  # Setup, validation, TLD download, packet filter setup, cleanup
+    if [ "$UDP_SCAN" -eq 1 ]; then
+        phases=$((phases + ${#CIDR_RANGES[@]} * 5))  # masscan, udp, nmap, analysis, domains per CIDR
+    else
+        phases=$((phases + ${#CIDR_RANGES[@]} * 4))  # masscan, nmap, analysis, domains per CIDR
+    fi
+    TOTAL_PHASES=$phases
+    echo "$phases" > "$PROGRESS_FILE"
+    echo "0" >> "$PROGRESS_FILE"  # current phase
+}
+
+# Visual progress bar with spinner
+show_progress_with_spinner() {
+    local percent="$1"
+    local message="$2"
+    local bar_length=40
+    local filled_length=$((percent * bar_length / 100))
+    
+    # Create progress bar
+    local bar=""
+    for ((i=0; i<filled_length; i++)); do bar+="█"; done
+    for ((i=filled_length; i<bar_length; i++)); do bar+="░"; done
+    
+    # Get spinner character
+    local spinner_char="${SPINNER_CHARS:$((SPINNER_INDEX % ${#SPINNER_CHARS})):1}"
+    SPINNER_INDEX=$((SPINNER_INDEX + 1))
+    
+    printf "\r%s [%s] %3d%% %s" "$spinner_char" "$bar" "$percent" "$message"
+}
+
+# Enhanced progress with time estimation
+track_phase_progress() {
+    local phase_name="$1"
+    local current_target="${2:-}"
+    
+    CURRENT_PHASE=$((CURRENT_PHASE + 1))
+    local current_time=$(date +%s)
+    local elapsed=$((current_time - SCRIPT_START_TIME))
+    
+    # Calculate ETA
+    local eta_formatted="calculating..."
+    if [ "$CURRENT_PHASE" -gt 1 ]; then
+        local avg_time_per_phase=$((elapsed / CURRENT_PHASE))
+        local remaining_phases=$((TOTAL_PHASES - CURRENT_PHASE))
+        local eta_seconds=$((remaining_phases * avg_time_per_phase))
+        local eta_time=$((current_time + eta_seconds))
+        
+        if [ "$MACOS" -eq 1 ]; then
+            eta_formatted=$(date -r "$eta_time" '+%H:%M:%S')
+        else
+            eta_formatted=$(date -d "@$eta_time" '+%H:%M:%S')
+        fi
+    fi
+    
+    local percent=$((CURRENT_PHASE * 100 / TOTAL_PHASES))
+    
+    # Update progress file
+    echo "$CURRENT_PHASE" > "${PROGRESS_FILE}.tmp" && mv "${PROGRESS_FILE}.tmp" "$PROGRESS_FILE"
+    echo "$percent" >> "$PROGRESS_FILE"
+    
+    # Format message with target if provided
+    local full_message="$phase_name"
+    if [ -n "$current_target" ]; then
+        full_message="$phase_name ($current_target)"
+    fi
+    
+    # Show visual progress
+    show_progress_with_spinner "$percent" "$full_message"
+    
+    # Also log detailed progress
+    printf "\n[Phase %d/%d] %s | ETA: %s | Elapsed: %dm%ds\n" \
+        "$CURRENT_PHASE" "$TOTAL_PHASES" "$full_message" "$eta_formatted" \
+        "$((elapsed / 60))" "$((elapsed % 60))"
+}
+
+# Cleanup progress files
+cleanup_progress() {
+    rm -f "$PROGRESS_FILE" "${PROGRESS_FILE}.tmp" 2>/dev/null
+}
+
 # Check for updates
 # Use the same branch name for checking and pulling
 REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
@@ -427,6 +520,11 @@ helptext >&2
 exit 1
 fi
 
+# Initialize progress tracking now that we know the CIDR ranges
+echo "Initializing progress tracking..."
+calculate_total_phases
+track_phase_progress "Initializing ScanCannon"
+
 #Check for root:
 if [ "$(id -u)" != "0" ]; then
 echo "ERROR: This script must be run as root"
@@ -464,6 +562,8 @@ esac
 else
 mkdir "results"
 fi
+
+track_phase_progress "Downloading TLD list"
 
 #Download and prep the latest list of TLDs from IANA (only if older than 1 day)
 TLD_FILE="./all_tlds.txt"
@@ -516,6 +616,8 @@ if [ "$DOWNLOAD_TLD" = true ]; then
     fi
 fi
 
+track_phase_progress "Configuring packet filters"
+
 #Prep packet filter for masscan. If you are using something else, you MUST do this manually.
 if [ "$MACOS" != 1 ]; then
 if iptables -C INPUT -p tcp --dport 40000:41023 -j DROP 2>/dev/null; then
@@ -542,6 +644,7 @@ DISCOVERED_SERVICES=0
 #Housekeeping function (defined early so it can be called by ctrl_c)
 function cleanup() {
 echo -e "\nPerforming cleanup. . . "
+cleanup_progress
 # Check if paused.conf exists before removing
 if [ -f ./paused.conf ]; then
     rm ./paused.conf
@@ -575,6 +678,7 @@ trap ctrl_c INT
 
 #Process each CIDR range
 for CIDR in "${CIDR_RANGES[@]}"; do
+track_phase_progress "Masscan scanning" "$CIDR"
 echo "Scanning $CIDR..."
 #make results directories named after subnet:
 # Handle special characters in directory names
@@ -624,9 +728,12 @@ CURRENT_HOST=0
 #Run in-depth nmap enumeration against discovered hosts & ports, and output to all formats
 #First we have to do a blind UDP nmap scan of common ports, as masscan does not support UDP. Note we Ping here to reduce scan time.
 if [ "$UDP_SCAN" -eq 1 ]; then
+    track_phase_progress "UDP scanning" "$CIDR"
     echo -e "\nStarting DNS, SNMP and VPN scan against all hosts"
     nmap -v --open -sV --version-light -sU -T3 -p 53,161,500 -oA "./results/${DIRNAME}/nmap_${DIRNAME}_udp" "$CIDR"
 fi
+
+track_phase_progress "TCP enumeration" "$CIDR"
 #Then nmap TCP against masscan-discovered hosts:
 while read -r TARGET; do
     IP="$(echo "$TARGET" | awk -F: '{print $1}')"
@@ -642,6 +749,7 @@ while read -r TARGET; do
 done <"./results/${DIRNAME}/hosts_and_ports.txt"
 echo -ne "\rProgress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n"
 
+track_phase_progress "Service analysis" "$CIDR"
 #Generate lists of Hosts:Ports hosting Interesting Services™️ for importing into cred stuffers (or other tools)
 mkdir -p "./results/${DIRNAME}/interesting_servers/"
 mkdir -p "./results/all_interesting_servers/"
@@ -674,6 +782,7 @@ if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
     done
 fi
 
+track_phase_progress "Domain resolution" "$CIDR"
 #Generate list of discovered sub/domains for this subnet.
 echo "Root Domain,IP,CIDR,AS#,IP Owner" > "./results/${DIRNAME}/resolved_root_domains.csv"
 echo "Root Domain,IP,CIDR,AS#,IP Owner" >> "./results/all_root_domains.csv"
@@ -750,6 +859,8 @@ if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
 fi
 done
 
+track_phase_progress "Finalizing results"
+
 #Restore packet filter backup
 echo -e "\nAll scans completed. Reverting packet filter configuration. . . "
 if [ "$MACOS" != 1 ]; then
@@ -773,6 +884,8 @@ find ./results -maxdepth 1 -type d -name "*_*" | while read -r dir; do
     fi
 done
 
+# Final progress update
+printf "\r%s [%s] %3d%% %s\n" "✓" "████████████████████████████████████████" "100" "Scan completed successfully!"
 
 #Print summary
 echo -e "\nScan Summary:"

@@ -14,6 +14,7 @@ ScanCannon handles the enumeration of extremely large networks (such as The Inte
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Usage Examples](#usage-examples)
+- [Progress Tracking](#progress-tracking)
 - [Understanding Output](#understanding-output)
 - [Safety & Legal Considerations](#safety--legal-considerations)
 - [Troubleshooting](#troubleshooting)
@@ -30,7 +31,7 @@ ScanCannon handles the enumeration of extremely large networks (such as The Inte
 - **Comprehensive output formats** including flat files for easy import into other tools
 - **Automatic domain/subdomain discovery** from scan results
 - **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.)
-- **Progress tracking** with real-time scan status
+- **Advanced progress tracking** with real-time visual feedback, ETA calculations, and phase monitoring
 - **Automatic cleanup** and file organization
 - **Cross-platform support** (Linux, MacOS, WSL2)
 
@@ -279,6 +280,53 @@ sudo ./scancannon.sh -u 203.0.113.0/24
 # Edit scancannon.conf: rate = 1000.00
 sudo ./scancannon.sh 203.0.113.0/16
 ```
+
+## Progress Tracking
+
+ScanCannon v1.3 includes comprehensive progress tracking to provide real-time feedback during long-running scans:
+
+### Visual Progress Features
+
+- **Animated spinner** with Unicode characters for active feedback
+- **Progress bar** showing completion percentage with visual blocks
+- **Phase tracking** displaying current operation (Masscan, TCP enumeration, etc.)
+- **ETA calculations** based on historical performance data
+- **Elapsed time** tracking in minutes and seconds
+- **Target information** showing current CIDR range being processed
+
+### Progress Display Example
+
+```
+⠋ [████████████████░░░░░░░░░░░░░░░░░░░░░░░░] 65% TCP enumeration (192.168.1.0/24)
+[Phase 8/12] TCP enumeration (192.168.1.0/24) | ETA: 14:32:15 | Elapsed: 5m23s
+```
+
+### Progress Phases
+
+ScanCannon tracks progress through these main phases:
+
+1. **Initialization** - Script startup and configuration
+2. **TLD Download** - Updating domain name lists
+3. **Packet Filter Setup** - Configuring network rules
+4. **Masscan Scanning** - High-speed port discovery (per CIDR)
+5. **UDP Scanning** - DNS/SNMP/VPN enumeration (if `-u` flag used)
+6. **TCP Enumeration** - Detailed nmap scanning (per CIDR)
+7. **Service Analysis** - Categorizing discovered services (per CIDR)
+8. **Domain Resolution** - Processing discovered domains (per CIDR)
+9. **Finalizing Results** - Cleanup and report generation
+
+### Progress Files
+
+- **`scancannon_progress.tmp`** - Real-time progress data for external monitoring
+- Progress information persists across interruptions for status checking
+- Automatically cleaned up on completion or cancellation
+
+### Benefits
+
+- **Better planning** - Know how long scans will take
+- **Monitoring capability** - Track progress from external scripts
+- **User experience** - Clear feedback prevents "is it working?" confusion
+- **Debugging aid** - Identify which phase is taking longest
 
 ## Understanding Output
 
