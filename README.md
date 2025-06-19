@@ -4,7 +4,7 @@
 
 **A Bash script for efficient credential attack surface enumeration and general reconnaissance of massive network ranges.**
 
-ScanCannon handles the enumeration of extremely large networks (such as The Internet) at as high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
+ScanCannon handles the enumeration of extremely large networks (such as The Internet) at high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
 
 ## Table of Contents
 
@@ -32,7 +32,7 @@ ScanCannon handles the enumeration of extremely large networks (such as The Inte
 - **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.)
 - **Progress tracking** with real-time scan status
 - **Automatic cleanup** and file organization
-- **Cross-platform support** (Linux and macOS)
+- **Cross-platform support** (Linux, MacOS, WSL2)
 
 ### Target Services
 
