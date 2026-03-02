@@ -24,7 +24,6 @@ TOTAL_PHASES=0
 CURRENT_PHASE=0
 SPINNER_CHARS="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 SPINNER_INDEX=0
-declare -A PHASE_TIMES
 
 # Calculate total phases upfront
 calculate_total_phases() {
