@@ -331,7 +331,9 @@ function extract_cidrs_from_whois() {
     done < <(echo "$whois_output" | grep -iE '^route:')
 
     # Deduplicate and print
-    printf '%s\n' "${cidrs[@]}" 2>/dev/null | sort -u -t'/' -k1,1V -k2,2n
+    if [ ${#cidrs[@]} -gt 0 ]; then
+        printf '%s\n' "${cidrs[@]}" | sort -u -t'/' -k1,1V -k2,2n
+    fi
 }
 
 # Extract ASN(s) from whois output
@@ -354,13 +356,87 @@ function extract_asn_from_whois() {
     done < <(echo "$whois_output" | grep -i '^origin:')
 
     # Deduplicate
-    printf '%s\n' "${asns[@]}" 2>/dev/null | sort -u
+    if [ ${#asns[@]} -gt 0 ]; then
+        printf '%s\n' "${asns[@]}" | sort -u
+    fi
 }
 
 # Extract organization name from whois output
+# Checks fields in priority order: OrgName > org-name > descr > netname
 function extract_org_from_whois() {
     local whois_output="$1"
-    echo "$whois_output" | grep -iE '^(OrgName|org-name|descr|netname):' | head -1 | sed 's/^[^:]*:[[:space:]]*//'
+    local result=""
+
+    # Check in priority order — OrgName is most authoritative
+    for field in 'OrgName' 'org-name' 'descr' 'netname'; do
+        result=$(echo "$whois_output" | grep -i "^${field}:" | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+        if [ -n "$result" ]; then
+            echo "$result"
+            return 0
+        fi
+    done
+
+    echo ""
+}
+
+# Extract ALL org-related strings from whois for cloud detection
+# Returns all unique values from OrgName, org-name, netname, descr fields
+function extract_all_org_fields() {
+    local whois_output="$1"
+    echo "$whois_output" | grep -iE '^(OrgName|org-name|descr|netname|Organization):' | \
+        sed 's/^[^:]*:[[:space:]]*//' | sort -u
+}
+
+# ===== CLOUD / VPS PROVIDER DETECTION =====
+# Check if the organization name belongs to a major cloud/VPS provider.
+# Scanning these shared-infrastructure ranges is not useful for target enumeration
+# because the CIDR ranges belong to the provider, not the target organization.
+# Returns 0 (true) if cloud provider detected, 1 (false) otherwise.
+CLOUD_PROVIDER_PATTERNS=(
+    "amazon"
+    "google"
+    "microsoft"
+    "digitalocean"
+    "vultr"
+    "choopa"
+    "constant company"
+    "linode"
+    "akamai"
+    "oracle"
+    "ovh"
+    "hetzner"
+    "cloudflare"
+    "alibaba"
+    "alicloud"
+    "softlayer"
+    "ibm cloud"
+    "rackspace"
+    "fastly"
+    "scaleway"
+    "upcloud"
+    "kamatera"
+    "leaseweb"
+    "contabo"
+    "hostinger"
+    "ionos"
+)
+
+function is_cloud_provider() {
+    local org_name="$1"
+    if [ -z "$org_name" ]; then
+        return 1
+    fi
+
+    local org_lower
+    org_lower=$(echo "$org_name" | tr '[:upper:]' '[:lower:]')
+
+    for pattern in "${CLOUD_PROVIDER_PATTERNS[@]}"; do
+        if [[ "$org_lower" == *"$pattern"* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # Query RADB (or similar IRR) for all prefixes announced by an ASN
@@ -410,6 +486,48 @@ function discover_networks_for_ip() {
     # Extract organization
     DISCOVERED_ORG=$(extract_org_from_whois "$whois_output")
 
+    # Check if the IP belongs to a cloud/VPS provider
+    # Check primary org name AND all org-related whois fields for thorough detection
+    local cloud_detected=false
+    local cloud_match_org="$DISCOVERED_ORG"
+    if is_cloud_provider "$DISCOVERED_ORG"; then
+        cloud_detected=true
+    else
+        # Also check all org-related fields (OrgName, netname, descr, Organization)
+        while IFS= read -r org_field; do
+            if [ -n "$org_field" ] && is_cloud_provider "$org_field"; then
+                cloud_detected=true
+                cloud_match_org="$org_field"
+                break
+            fi
+        done < <(extract_all_org_fields "$whois_output")
+    fi
+    if [ "$cloud_detected" = true ]; then
+        echo ""
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║  ⚠️  CLOUD/VPS PROVIDER DETECTED                            ║"
+        echo "  ╠══════════════════════════════════════════════════════════════╣"
+        printf "  ║  IP       : %-49s║\n" "$ip"
+        printf "  ║  Org      : %-49s║\n" "${cloud_match_org:0:49}"
+        echo "  ╠══════════════════════════════════════════════════════════════╣"
+        echo "  ║  This IP is hosted on shared cloud/VPS infrastructure.     ║"
+        echo "  ║  The CIDR ranges belong to the provider, NOT the target.   ║"
+        echo "  ║  Scanning these ranges would scan the entire provider's    ║"
+        echo "  ║  network, which is not useful and potentially dangerous.   ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        read -r -p "  Do you still want to proceed with network discovery for this IP? [y/N]: " cloud_choice
+        case "$cloud_choice" in
+            y|Y )
+                echo "  Proceeding with cloud-hosted network discovery as requested."
+                ;;
+            * )
+                echo "  Skipping this IP."
+                return 2  # Cloud provider skipped by user choice
+                ;;
+        esac
+    fi
+
     # Extract direct CIDRs from whois
     local direct_cidrs
     direct_cidrs=$(extract_cidrs_from_whois "$whois_output")
@@ -435,15 +553,17 @@ function discover_networks_for_ip() {
     fi
 
     # Query RADB for each ASN
-    for asn in "${DISCOVERED_ASNS[@]}"; do
-        local asn_prefixes
-        asn_prefixes=$(discover_asn_prefixes "$asn")
-        if [ -n "$asn_prefixes" ]; then
-            while IFS= read -r prefix; do
-                all_prefixes+=("$prefix")
-            done <<< "$asn_prefixes"
-        fi
-    done
+    if [ ${#DISCOVERED_ASNS[@]} -gt 0 ]; then
+        for asn in "${DISCOVERED_ASNS[@]}"; do
+            local asn_prefixes
+            asn_prefixes=$(discover_asn_prefixes "$asn")
+            if [ -n "$asn_prefixes" ]; then
+                while IFS= read -r prefix; do
+                    all_prefixes+=("$prefix")
+                done <<< "$asn_prefixes"
+            fi
+        done
+    fi
 
     # Deduplicate final list
     if [ ${#all_prefixes[@]} -gt 0 ]; then
@@ -583,37 +703,68 @@ function resolve_domain_to_cidr() {
     local all_asns=()
     local org_name=""
 
+    local cloud_skip_count=0
     for ip in "${all_ips[@]}"; do
         echo "  ── Discovering networks for IP: $ip ──"
-        discover_networks_for_ip "$ip" "$hostname"
+        local disc_rc=0
+        discover_networks_for_ip "$ip" "$hostname" || disc_rc=$?
+
+        if [ "$disc_rc" -eq 2 ]; then
+            # Cloud provider detected for this IP — skip it
+            cloud_skip_count=$((cloud_skip_count + 1))
+            continue
+        elif [ "$disc_rc" -ne 0 ]; then
+            echo "  WARNING: Network discovery failed for $ip (exit code $disc_rc), skipping."
+            continue
+        fi
 
         if [ -n "$DISCOVERED_ORG" ] && [ -z "$org_name" ]; then
             org_name="$DISCOVERED_ORG"
         fi
 
-        for asn in "${DISCOVERED_ASNS[@]}"; do
-            all_asns+=("$asn")
-        done
+        if [ ${#DISCOVERED_ASNS[@]} -gt 0 ]; then
+            for asn in "${DISCOVERED_ASNS[@]}"; do
+                all_asns+=("$asn")
+            done
+        fi
 
-        for range in "${DISCOVERED_RANGES[@]}"; do
-            all_ranges+=("$range")
-        done
+        if [ ${#DISCOVERED_RANGES[@]} -gt 0 ]; then
+            for range in "${DISCOVERED_RANGES[@]}"; do
+                all_ranges+=("$range")
+            done
+        fi
     done
+
+    # If ALL IPs were cloud-hosted, return error
+    if [ "$cloud_skip_count" -eq "${#all_ips[@]}" ]; then
+        echo ""
+        echo "  ERROR: All ${#all_ips[@]} IP(s) for '$hostname' are hosted on cloud/VPS providers."
+        echo "  No scannable networks found. Skipping this domain."
+        return 2
+    fi
 
     # Deduplicate
     local unique_ranges=()
-    while IFS= read -r range; do
-        unique_ranges+=("$range")
-    done < <(printf '%s\n' "${all_ranges[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+    if [ ${#all_ranges[@]} -gt 0 ]; then
+        while IFS= read -r range; do
+            unique_ranges+=("$range")
+        done < <(printf '%s\n' "${all_ranges[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+    fi
 
     local unique_asns=()
-    while IFS= read -r asn; do
-        unique_asns+=("$asn")
-    done < <(printf '%s\n' "${all_asns[@]}" 2>/dev/null | sort -u)
+    if [ ${#all_asns[@]} -gt 0 ]; then
+        while IFS= read -r asn; do
+            unique_asns+=("$asn")
+        done < <(printf '%s\n' "${all_asns[@]}" | sort -u)
+    fi
 
     # Store for display in interactive_range_selection
     DISCOVERED_ORG="$org_name"
-    DISCOVERED_ASNS=("${unique_asns[@]}")
+    if [ ${#unique_asns[@]} -gt 0 ]; then
+        DISCOVERED_ASNS=("${unique_asns[@]}")
+    else
+        DISCOVERED_ASNS=()
+    fi
 
     # Interactive selection
     if interactive_range_selection "$hostname" "${unique_ranges[@]}"; then
@@ -633,13 +784,23 @@ function discover_networks_for_cidr() {
     rep_ip=$(cidr_first_ip "$cidr_input")
 
     echo "  ── Discovering networks for CIDR: $cidr_input (via $rep_ip) ──"
-    discover_networks_for_ip "$rep_ip" "$cidr_input"
+    local disc_rc=0
+    discover_networks_for_ip "$rep_ip" "$cidr_input" || disc_rc=$?
+
+    if [ "$disc_rc" -eq 2 ]; then
+        # Cloud provider detected — still allow scanning the user-specified CIDR
+        echo "  NOTE: Cloud provider detected, but proceeding with user-specified CIDR: $cidr_input"
+    elif [ "$disc_rc" -ne 0 ]; then
+        echo "  WARNING: Network discovery failed for $cidr_input, proceeding with specified CIDR only."
+    fi
 
     # Always include the original CIDR in the discovery results
     local all_ranges=("$cidr_input")
-    for range in "${DISCOVERED_RANGES[@]}"; do
-        all_ranges+=("$range")
-    done
+    if [ ${#DISCOVERED_RANGES[@]} -gt 0 ]; then
+        for range in "${DISCOVERED_RANGES[@]}"; do
+            all_ranges+=("$range")
+        done
+    fi
 
     # Deduplicate
     local unique_ranges=()
@@ -961,10 +1122,16 @@ if [ ${#DOMAIN_ARGS[@]} -gt 0 ]; then
     echo "=== Domain Mode: Full Network Discovery ==="
     for domain_input in "${DOMAIN_ARGS[@]}"; do
         RESOLVED_CIDRS=()
-        if resolve_domain_to_cidr "$domain_input"; then
+        resolve_rc=0
+        resolve_domain_to_cidr "$domain_input" || resolve_rc=$?
+        if [ "$resolve_rc" -eq 0 ]; then
             for selected in "${RESOLVED_CIDRS[@]}"; do
                 CIDR_RANGES+=("$selected")
             done
+        elif [ "$resolve_rc" -eq 2 ]; then
+            # Cloud provider — skip this domain, try next
+            echo "  Skipping domain '$domain_input' (cloud/VPS provider)."
+            continue
         else
             exit 1
         fi
@@ -986,10 +1153,16 @@ if [ ${#CIDR_FLAG_ARGS[@]} -gt 0 ]; then
         fi
         # Run ASN discovery for this CIDR
         RESOLVED_CIDRS=()
-        if discover_networks_for_cidr "$cidr_input"; then
+        cidr_rc=0
+        discover_networks_for_cidr "$cidr_input" || cidr_rc=$?
+        if [ "$cidr_rc" -eq 0 ]; then
             for selected in "${RESOLVED_CIDRS[@]}"; do
                 CIDR_RANGES+=("$selected")
             done
+        elif [ "$cidr_rc" -eq 2 ]; then
+            # Cloud provider — but -c was explicit, ranges already handled
+            echo "  NOTE: Cloud provider network, but scanning user-specified CIDR."
+            CIDR_RANGES+=("$cidr_input")
         else
             exit 1
         fi
