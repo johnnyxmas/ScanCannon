@@ -13,7 +13,7 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.3 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.5 by J0hnnyXm4s ¤]×)¤••\n"
 
 # ===== PROGRESS TRACKING SYSTEM =====
 
@@ -29,11 +29,14 @@ declare -A PHASE_TIMES
 # Calculate total phases upfront
 calculate_total_phases() {
     local phases=5  # Setup, validation, TLD download, packet filter setup, cleanup
+    local per_cidr=4  # masscan, nmap, analysis, domains (always)
     if [ "$UDP_SCAN" -eq 1 ]; then
-        phases=$((phases + ${#CIDR_RANGES[@]} * 5))  # masscan, udp, nmap, analysis, domains per CIDR
-    else
-        phases=$((phases + ${#CIDR_RANGES[@]} * 4))  # masscan, nmap, analysis, domains per CIDR
+        per_cidr=$((per_cidr + 1))  # UDP scan phase
     fi
+    if [ "$API_SCAN" -eq 1 ]; then
+        per_cidr=$((per_cidr + 1))  # API detection phase
+    fi
+    phases=$((phases + ${#CIDR_RANGES[@]} * per_cidr))
     TOTAL_PHASES=$phases
     echo "$phases" > "$PROGRESS_FILE"
     echo "0" >> "$PROGRESS_FILE"  # current phase
@@ -140,8 +143,21 @@ fi
 #Help Text:
 function helptext() {
 echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
-echo "usage: scancannon.sh [-u] [CIDR range | file containing line-separated CIDR ranges]"
-echo "  -u  Perform UDP scan on common ports (53, 161, 500) using nmap"
+echo "usage: scancannon.sh [-u] [-a] -d domain | -c CIDR  (at least one required)"
+echo ""
+echo "  -d domain  Resolve a domain to its owning CIDR range via whois (repeatable)"
+echo "             Accepts a bare domain (example.com) or URL (https://sub.example.com/path)"
+echo "             URLs are automatically stripped to domain + TLD"
+echo "  -c CIDR    Specify a CIDR range directly (repeatable)"
+echo "  -u         Perform UDP scan on common ports (53, 161, 500) using nmap"
+echo "  -a         Perform API endpoint detection on HTTP/HTTPS services (requires curl)"
+echo ""
+echo "  At least one -d or -c flag is required. You may combine both."
+echo "  Examples:"
+echo "    scancannon.sh -d example.com"
+echo "    scancannon.sh -c 203.0.113.0/24"
+echo "    scancannon.sh -d https://example.com -c 10.0.0.0/24"
+echo "    scancannon.sh -ua -d example.com"
 }
 
 # Function to validate CIDR notation
@@ -194,6 +210,451 @@ function validate_cidr() {
             exit 1
         }
     }'
+}
+
+# Function to extract base domain+TLD from a URL or hostname
+# e.g. "https://sub.example.com/path?q=1" → "example.com"
+# e.g. "mail.example.co.uk" → "example.co.uk"  (best-effort for 2-part TLDs)
+function extract_domain() {
+    local input="$1"
+
+    # Strip protocol (http://, https://, ftp://, etc.)
+    local hostname
+    hostname=$(echo "$input" | sed -E 's|^[a-zA-Z]+://||')
+    # Strip path, query string, port, trailing slashes
+    hostname=$(echo "$hostname" | sed -E 's|[:/].*||; s|/$||')
+
+    # Strip "www." prefix
+    hostname=$(echo "$hostname" | sed -E 's|^www\.||i')
+
+    if [ -z "$hostname" ]; then
+        echo ""
+        return 1
+    fi
+
+    # Extract base domain + TLD (last two dot-separated parts)
+    # Handles: sub.example.com → example.com
+    #          deep.sub.example.com → example.com
+    #          example.com → example.com
+    local parts
+    parts=$(echo "$hostname" | awk -F'.' '{print NF}')
+    if [ "$parts" -gt 2 ]; then
+        hostname=$(echo "$hostname" | awk -F'.' '{print $(NF-1)"."$NF}')
+    fi
+
+    echo "$hostname"
+}
+
+# ===== NETWORK DISCOVERY ENGINE =====
+# Shared infrastructure for both -d (domain) and -c (CIDR) inputs.
+# Pipeline: IP → whois (CIDR + ASN + Org) → RADB (all ASN prefixes) → interactive selection
+
+# Helper: convert an IP range (start - end) to CIDR notation
+function inetnum_to_cidr() {
+    local start_ip="$1"
+    local end_ip="$2"
+
+    local IFS='.'
+    read -r a b c d <<< "$start_ip"
+    local start_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
+    read -r a b c d <<< "$end_ip"
+    local end_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
+    unset IFS
+
+    local diff=$(( end_int - start_int + 1 ))
+    local prefix=32
+    local size=1
+    while [ "$size" -lt "$diff" ] && [ "$prefix" -gt 0 ]; do
+        prefix=$((prefix - 1))
+        size=$((size * 2))
+    done
+
+    echo "${start_ip}/${prefix}"
+}
+
+# Helper: extract the first IP from a CIDR (network address)
+function cidr_first_ip() {
+    echo "$1" | cut -d'/' -f1
+}
+
+# Extract ALL CIDRs from whois output (not just the first match)
+function extract_cidrs_from_whois() {
+    local whois_output="$1"
+    local cidrs=()
+
+    # ARIN format: CIDR lines (may contain comma-separated ranges)
+    while IFS= read -r line; do
+        # Split comma-separated CIDRs on one line
+        local cleaned
+        cleaned=$(echo "$line" | sed 's/^CIDR:[[:space:]]*//')
+        IFS=',' read -ra parts <<< "$cleaned"
+        for part in "${parts[@]}"; do
+            part=$(echo "$part" | tr -d '[:space:]')
+            if [ -n "$part" ]; then
+                cidrs+=("$part")
+            fi
+        done
+    done < <(echo "$whois_output" | grep -i '^CIDR:')
+
+    # RIPE/APNIC format: inetnum lines → convert to CIDR
+    while IFS= read -r line; do
+        local range
+        range=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
+        local range_start range_end
+        range_start=$(echo "$range" | awk -F' - ' '{gsub(/[[:space:]]/, "", $1); print $1}')
+        range_end=$(echo "$range" | awk -F' - ' '{gsub(/[[:space:]]/, "", $2); print $2}')
+        if [ -n "$range_start" ] && [ -n "$range_end" ]; then
+            local c
+            c=$(inetnum_to_cidr "$range_start" "$range_end")
+            if [ -n "$c" ]; then cidrs+=("$c"); fi
+        fi
+    done < <(echo "$whois_output" | grep -i '^inetnum:')
+
+    # NetRange lines → convert to CIDR
+    while IFS= read -r line; do
+        local range
+        range=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
+        local range_start range_end
+        range_start=$(echo "$range" | awk -F' - ' '{gsub(/[[:space:]]/, "", $1); print $1}')
+        range_end=$(echo "$range" | awk -F' - ' '{gsub(/[[:space:]]/, "", $2); print $2}')
+        if [ -n "$range_start" ] && [ -n "$range_end" ]; then
+            local c
+            c=$(inetnum_to_cidr "$range_start" "$range_end")
+            if [ -n "$c" ]; then cidrs+=("$c"); fi
+        fi
+    done < <(echo "$whois_output" | grep -i '^NetRange:')
+
+    # route: field
+    while IFS= read -r line; do
+        local r
+        r=$(echo "$line" | awk '{print $2}')
+        if [ -n "$r" ]; then cidrs+=("$r"); fi
+    done < <(echo "$whois_output" | grep -iE '^route:')
+
+    # Deduplicate and print
+    printf '%s\n' "${cidrs[@]}" 2>/dev/null | sort -u -t'/' -k1,1V -k2,2n
+}
+
+# Extract ASN(s) from whois output
+function extract_asn_from_whois() {
+    local whois_output="$1"
+    local asns=()
+
+    # ARIN format: OriginAS
+    while IFS= read -r line; do
+        local asn
+        asn=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | grep -oE 'AS[0-9]+')
+        if [ -n "$asn" ]; then asns+=("$asn"); fi
+    done < <(echo "$whois_output" | grep -i '^OriginAS:')
+
+    # RIPE/APNIC format: origin
+    while IFS= read -r line; do
+        local asn
+        asn=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | grep -oE 'AS[0-9]+')
+        if [ -n "$asn" ]; then asns+=("$asn"); fi
+    done < <(echo "$whois_output" | grep -i '^origin:')
+
+    # Deduplicate
+    printf '%s\n' "${asns[@]}" 2>/dev/null | sort -u
+}
+
+# Extract organization name from whois output
+function extract_org_from_whois() {
+    local whois_output="$1"
+    echo "$whois_output" | grep -iE '^(OrgName|org-name|descr|netname):' | head -1 | sed 's/^[^:]*:[[:space:]]*//'
+}
+
+# Query RADB (or similar IRR) for all prefixes announced by an ASN
+function discover_asn_prefixes() {
+    local asn="$1"
+    local prefixes=()
+
+    echo "  Querying RADB for all prefixes announced by $asn..."
+
+    local radb_output
+    radb_output=$(whois -h whois.radb.net -- "-i origin $asn" 2>/dev/null)
+
+    if [ -n "$radb_output" ]; then
+        while IFS= read -r line; do
+            local prefix
+            prefix=$(echo "$line" | awk '{print $2}')
+            if [ -n "$prefix" ]; then
+                prefixes+=("$prefix")
+            fi
+        done < <(echo "$radb_output" | grep -iE '^route:')
+    fi
+
+    # Deduplicate and print
+    if [ ${#prefixes[@]} -gt 0 ]; then
+        printf '%s\n' "${prefixes[@]}" | sort -u -t'/' -k1,1V -k2,2n
+    fi
+}
+
+# Full network discovery for a single IP address
+# Returns all discovered CIDR ranges via DISCOVERED_RANGES array
+function discover_networks_for_ip() {
+    local ip="$1"
+    local source_label="${2:-$ip}"
+    DISCOVERED_RANGES=()
+    DISCOVERED_ORG=""
+    DISCOVERED_ASNS=()
+
+    echo "  Looking up $ip via whois..."
+    local whois_output
+    whois_output=$(whois "$ip" 2>/dev/null)
+
+    if [ -z "$whois_output" ]; then
+        echo "  WARNING: whois returned no data for $ip"
+        return 1
+    fi
+
+    # Extract organization
+    DISCOVERED_ORG=$(extract_org_from_whois "$whois_output")
+
+    # Extract direct CIDRs from whois
+    local direct_cidrs
+    direct_cidrs=$(extract_cidrs_from_whois "$whois_output")
+
+    # Extract ASNs
+    local asn_list
+    asn_list=$(extract_asn_from_whois "$whois_output")
+
+    if [ -n "$asn_list" ]; then
+        while IFS= read -r asn; do
+            DISCOVERED_ASNS+=("$asn")
+        done <<< "$asn_list"
+    fi
+
+    # Collect all prefixes: direct whois CIDRs + ASN-announced prefixes
+    local all_prefixes=()
+
+    # Add direct CIDRs
+    if [ -n "$direct_cidrs" ]; then
+        while IFS= read -r cidr; do
+            all_prefixes+=("$cidr")
+        done <<< "$direct_cidrs"
+    fi
+
+    # Query RADB for each ASN
+    for asn in "${DISCOVERED_ASNS[@]}"; do
+        local asn_prefixes
+        asn_prefixes=$(discover_asn_prefixes "$asn")
+        if [ -n "$asn_prefixes" ]; then
+            while IFS= read -r prefix; do
+                all_prefixes+=("$prefix")
+            done <<< "$asn_prefixes"
+        fi
+    done
+
+    # Deduplicate final list
+    if [ ${#all_prefixes[@]} -gt 0 ]; then
+        while IFS= read -r range; do
+            DISCOVERED_RANGES+=("$range")
+        done < <(printf '%s\n' "${all_prefixes[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+    fi
+}
+
+# Interactive range selection — present discovered ranges, let user choose
+# Sets SELECTED_RANGES array with the user's selections
+function interactive_range_selection() {
+    local source_label="$1"
+    shift
+    local ranges=("$@")
+    SELECTED_RANGES=()
+
+    if [ ${#ranges[@]} -eq 0 ]; then
+        echo "  No CIDR ranges discovered."
+        return 1
+    fi
+
+    if [ ${#ranges[@]} -eq 1 ]; then
+        echo ""
+        echo "  Discovered 1 CIDR range for $source_label:"
+        echo "    [1] ${ranges[0]}"
+        echo ""
+        echo "  WARNING: Make sure you have authorization to scan this network!"
+        read -r -p "  Proceed with scanning ${ranges[0]}? [y/N]: " confirm
+        case "$confirm" in
+            y|Y ) SELECTED_RANGES=("${ranges[0]}"); return 0 ;;
+            * ) echo "  Scan cancelled."; return 1 ;;
+        esac
+    fi
+
+    echo ""
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║  Network Discovery Results                                 ║"
+    echo "  ╠══════════════════════════════════════════════════════════════╣"
+    printf "  ║  Source : %-50s║\n" "${source_label:0:50}"
+    if [ -n "$DISCOVERED_ORG" ]; then
+        printf "  ║  Org    : %-50s║\n" "${DISCOVERED_ORG:0:50}"
+    fi
+    if [ ${#DISCOVERED_ASNS[@]} -gt 0 ]; then
+        local asn_str
+        asn_str=$(printf '%s ' "${DISCOVERED_ASNS[@]}")
+        printf "  ║  ASN(s) : %-50s║\n" "${asn_str:0:50}"
+    fi
+    printf "  ║  Ranges : %-50s║\n" "${#ranges[@]} CIDR block(s) discovered"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  Discovered CIDR ranges:"
+    for i in "${!ranges[@]}"; do
+        printf "    [%2d] %s\n" "$((i + 1))" "${ranges[$i]}"
+    done
+    echo ""
+    echo "  WARNING: Make sure you have authorization to scan these networks!"
+    echo ""
+    echo "  Enter your selection:"
+    echo "    • 'all'                — scan all discovered ranges"
+    echo "    • comma-separated nums — e.g. '1,3,5' to select specific ranges"
+    echo "    • 'none' or empty      — cancel"
+    echo ""
+    read -r -p "  Selection: " selection
+
+    # Parse selection
+    if [ -z "$selection" ] || [ "$selection" = "none" ]; then
+        echo "  Scan cancelled."
+        return 1
+    fi
+
+    if [ "$selection" = "all" ]; then
+        SELECTED_RANGES=("${ranges[@]}")
+        echo "  Selected all ${#ranges[@]} range(s)."
+        return 0
+    fi
+
+    # Parse comma-separated numbers
+    IFS=',' read -ra nums <<< "$selection"
+    for num in "${nums[@]}"; do
+        num=$(echo "$num" | tr -d '[:space:]')
+        if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#ranges[@]} ]; then
+            SELECTED_RANGES+=("${ranges[$((num - 1))]}")
+        else
+            echo "  WARNING: Ignoring invalid selection '$num'"
+        fi
+    done
+
+    if [ ${#SELECTED_RANGES[@]} -eq 0 ]; then
+        echo "  No valid ranges selected. Scan cancelled."
+        return 1
+    fi
+
+    echo "  Selected ${#SELECTED_RANGES[@]} range(s)."
+    return 0
+}
+
+# ===== HIGH-LEVEL DISCOVERY FUNCTIONS =====
+
+# Resolve a domain (-d flag) to CIDR ranges via full ASN discovery pipeline
+function resolve_domain_to_cidr() {
+    local input="$1"
+
+    # Extract clean domain+TLD (strips URLs, subdomains, paths)
+    local hostname
+    hostname=$(extract_domain "$input")
+
+    if [ -z "$hostname" ]; then
+        echo "ERROR: Could not extract domain from '$input'"
+        return 1
+    fi
+
+    echo "  Input:  $input"
+    echo "  Domain: $hostname"
+    echo ""
+
+    # Resolve ALL A records for the domain
+    echo "  Resolving all A records for $hostname..."
+    local all_ips=()
+    while IFS= read -r ip; do
+        if [ -n "$ip" ]; then
+            all_ips+=("$ip")
+        fi
+    done < <(dig +short "$hostname" A 2>/dev/null | grep -E '^[0-9]+\.')
+
+    if [ ${#all_ips[@]} -eq 0 ]; then
+        echo "ERROR: Could not resolve '$hostname' to any IP address."
+        echo "Make sure the hostname is correct and DNS is reachable."
+        return 1
+    fi
+
+    echo "  Found ${#all_ips[@]} IP(s): ${all_ips[*]}"
+    echo ""
+
+    # Run full discovery for each unique IP, collect all ranges
+    local all_ranges=()
+    local all_asns=()
+    local org_name=""
+
+    for ip in "${all_ips[@]}"; do
+        echo "  ── Discovering networks for IP: $ip ──"
+        discover_networks_for_ip "$ip" "$hostname"
+
+        if [ -n "$DISCOVERED_ORG" ] && [ -z "$org_name" ]; then
+            org_name="$DISCOVERED_ORG"
+        fi
+
+        for asn in "${DISCOVERED_ASNS[@]}"; do
+            all_asns+=("$asn")
+        done
+
+        for range in "${DISCOVERED_RANGES[@]}"; do
+            all_ranges+=("$range")
+        done
+    done
+
+    # Deduplicate
+    local unique_ranges=()
+    while IFS= read -r range; do
+        unique_ranges+=("$range")
+    done < <(printf '%s\n' "${all_ranges[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+
+    local unique_asns=()
+    while IFS= read -r asn; do
+        unique_asns+=("$asn")
+    done < <(printf '%s\n' "${all_asns[@]}" 2>/dev/null | sort -u)
+
+    # Store for display in interactive_range_selection
+    DISCOVERED_ORG="$org_name"
+    DISCOVERED_ASNS=("${unique_asns[@]}")
+
+    # Interactive selection
+    if interactive_range_selection "$hostname" "${unique_ranges[@]}"; then
+        RESOLVED_CIDRS=("${SELECTED_RANGES[@]}")
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Discover related networks for a -c CIDR range via ASN discovery pipeline
+function discover_networks_for_cidr() {
+    local cidr_input="$1"
+
+    # Get a representative IP from the CIDR (the network address)
+    local rep_ip
+    rep_ip=$(cidr_first_ip "$cidr_input")
+
+    echo "  ── Discovering networks for CIDR: $cidr_input (via $rep_ip) ──"
+    discover_networks_for_ip "$rep_ip" "$cidr_input"
+
+    # Always include the original CIDR in the discovery results
+    local all_ranges=("$cidr_input")
+    for range in "${DISCOVERED_RANGES[@]}"; do
+        all_ranges+=("$range")
+    done
+
+    # Deduplicate
+    local unique_ranges=()
+    while IFS= read -r range; do
+        unique_ranges+=("$range")
+    done < <(printf '%s\n' "${all_ranges[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+
+    # Interactive selection
+    if interactive_range_selection "$cidr_input" "${unique_ranges[@]}"; then
+        RESOLVED_CIDRS=("${SELECTED_RANGES[@]}")
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Function to validate exclude file
@@ -433,10 +894,28 @@ configure_adapter
 
 #Parse command line options
 UDP_SCAN=0
-while getopts ":u" opt; do
+API_SCAN=0
+DOMAIN_ARGS=()
+CIDR_FLAG_ARGS=()
+
+while getopts ":uad:c:" opt; do
 case ${opt} in
 u )
 UDP_SCAN=1
+;;
+a )
+API_SCAN=1
+;;
+d )
+DOMAIN_ARGS+=("$OPTARG")
+;;
+c )
+CIDR_FLAG_ARGS+=("$OPTARG")
+;;
+: )
+echo "ERROR: Option -$OPTARG requires an argument." 1>&2
+helptext
+exit 1
 ;;
 ? )
 echo "Invalid option: $OPTARG" 1>&2
@@ -447,11 +926,12 @@ esac
 done
 shift $((OPTIND -1))
 
-#Make sure an argument is supplied:
-if [ "$#" -ne 1 ]; then
-echo "ERROR: Invalid argument(s)."
-helptext >&2
-exit 1
+# Check API scan dependencies
+if [ "$API_SCAN" -eq 1 ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ERROR: curl is required for API scanning (-a). Please install it."
+        exit 1
+    fi
 fi
 
 # Validate exclude file first
@@ -459,66 +939,87 @@ if ! validate_exclude_file; then
     exit 1
 fi
 
-#Check if the argument is a valid CIDR range or a file
-if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$'; then
-    # Validate single CIDR range
-    if validate_cidr "$1" "1" "command line argument"; then
-        # Add /32 if no CIDR notation is present
-        if echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-            CIDR_RANGES=("$1/32")
-        else
-            CIDR_RANGES=("$1")
-        fi
-    else
-        exit 1
-    fi
-elif [ -s "$1" ]; then
-    echo "Validating CIDR ranges in file: $1"
-    # Validate file contents first
-    line_num=0
-    errors=0
-    while IFS= read -r line; do
-        line_num=$((line_num + 1))
-        if ! validate_cidr "$line" "$line_num" "$1"; then
-            errors=$((errors + 1))
-        fi
-    done < "$1"
-    
-    if [ $errors -gt 0 ]; then
-        echo "ERROR: Found $errors validation error(s) in $1"
-        echo "Please fix the errors and try again."
-        exit 1
-    fi
-    
-    echo "Input file validation passed."
-    
-    # Process validated file
-    CIDR_RANGES=()
-    while IFS= read -r line; do
-        # Skip empty lines and comments
-        if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
-            # Clean up whitespace
-            line=$(echo "$line" | tr -d '[:space:]')
-            # Add /32 if no CIDR notation is present for each line
-            if echo "$line" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-                CIDR_RANGES+=("$line/32")
-            else
-                CIDR_RANGES+=("$line")
-            fi
-        fi
-    done < "$1"
-    
-    if [ ${#CIDR_RANGES[@]} -eq 0 ]; then
-        echo "ERROR: No valid CIDR ranges found in $1"
-        exit 1
-    fi
-    
-    echo "Loaded ${#CIDR_RANGES[@]} valid CIDR range(s) from $1"
-else
-echo "ERROR: Invalid CIDR range or file."
-helptext >&2
-exit 1
+# ---- Build CIDR_RANGES from all input sources ----
+CIDR_RANGES=()
+
+# Reject unexpected positional arguments
+if [ "$#" -gt 0 ]; then
+    echo "ERROR: Unexpected argument '$1'. Use -d for domains or -c for CIDR ranges."
+    helptext >&2
+    exit 1
 fi
+
+# Require at least one -d or -c flag
+if [ ${#DOMAIN_ARGS[@]} -eq 0 ] && [ ${#CIDR_FLAG_ARGS[@]} -eq 0 ]; then
+    echo "ERROR: At least one -d (domain) or -c (CIDR) flag is required."
+    helptext >&2
+    exit 1
+fi
+
+# 1) Process -d (domain) flags — full ASN discovery pipeline
+if [ ${#DOMAIN_ARGS[@]} -gt 0 ]; then
+    echo ""
+    echo "=== Domain Mode: Full Network Discovery ==="
+    for domain_input in "${DOMAIN_ARGS[@]}"; do
+        RESOLVED_CIDRS=()
+        if resolve_domain_to_cidr "$domain_input"; then
+            for selected in "${RESOLVED_CIDRS[@]}"; do
+                CIDR_RANGES+=("$selected")
+            done
+        else
+            exit 1
+        fi
+    done
+fi
+
+# 2) Process -c (CIDR) flags — validate, then run ASN discovery
+if [ ${#CIDR_FLAG_ARGS[@]} -gt 0 ]; then
+    echo ""
+    echo "=== CIDR Mode: Full Network Discovery ==="
+    for cidr_input in "${CIDR_FLAG_ARGS[@]}"; do
+        # Validate the input CIDR first
+        if ! validate_cidr "$cidr_input" "1" "-c flag"; then
+            exit 1
+        fi
+        # Add /32 if no CIDR notation present
+        if echo "$cidr_input" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            cidr_input="$cidr_input/32"
+        fi
+        # Run ASN discovery for this CIDR
+        RESOLVED_CIDRS=()
+        if discover_networks_for_cidr "$cidr_input"; then
+            for selected in "${RESOLVED_CIDRS[@]}"; do
+                CIDR_RANGES+=("$selected")
+            done
+        else
+            exit 1
+        fi
+    done
+fi
+
+# Final deduplication of all collected CIDR ranges
+if [ ${#CIDR_RANGES[@]} -gt 0 ]; then
+    local_unique=()
+    while IFS= read -r range; do
+        local_unique+=("$range")
+    done < <(printf '%s\n' "${CIDR_RANGES[@]}" | sort -u -t'/' -k1,1V -k2,2n)
+    CIDR_RANGES=("${local_unique[@]}")
+fi
+
+if [ ${#CIDR_RANGES[@]} -eq 0 ]; then
+    echo "ERROR: No CIDR ranges selected. Cannot proceed."
+    exit 1
+fi
+
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo "  Final scan targets: ${#CIDR_RANGES[@]} CIDR range(s)"
+echo "═══════════════════════════════════════════════════"
+for r in "${CIDR_RANGES[@]}"; do
+    echo "  • $r"
+done
+echo "═══════════════════════════════════════════════════"
+echo ""
 
 # Initialize progress tracking now that we know the CIDR ranges
 echo "Initializing progress tracking..."
@@ -640,6 +1141,7 @@ fi
 TOTAL_IPS=0
 RESPONSIVE_IPS=0
 DISCOVERED_SERVICES=0
+DISCOVERED_API_ENDPOINTS=0
 
 #Housekeeping function (defined early so it can be called by ctrl_c)
 function cleanup() {
@@ -676,7 +1178,272 @@ exit 0
 }
 trap ctrl_c INT
 
-#Process each CIDR range
+# ===== API ENDPOINT DETECTION FUNCTION =====
+function detect_api_endpoints() {
+    local dirname="$1"
+    local api_output_dir="./results/${dirname}/interesting_servers"
+    local api_details_file="${api_output_dir}/api_details.txt"
+    local api_servers_file="${api_output_dir}/api_servers.txt"
+    local global_api_file="./results/all_interesting_servers/all_api_servers.txt"
+
+    mkdir -p "$api_output_dir"
+    echo "=== API Endpoint Detection ===" > "$api_details_file"
+    : > "$api_servers_file"
+
+    echo -e "\n--- API Endpoint Detection ---"
+
+    # --- TIER 1: Parse nmap XML for API indicators (single pass, POSIX awk) ---
+    echo "[Tier 1] Analyzing nmap output for API indicators..."
+
+    if ls "./results/${dirname}"/*.xml >/dev/null 2>&1; then
+        awk '
+            /<address / && /addrtype="ipv4"/ {
+                s = $0
+                idx = index(s, "addr=\"")
+                if (idx > 0) {
+                    s = substr(s, idx + 6)
+                    end = index(s, "\"")
+                    if (end > 0) ip = substr(s, 1, end - 1)
+                }
+            }
+
+            # Track current port — extract from portid="..."
+            /<port protocol="tcp" portid=/ {
+                s = $0
+                idx = index(s, "portid=\"")
+                if (idx > 0) {
+                    s = substr(s, idx + 8)
+                    end = index(s, "\"")
+                    if (end > 0) port = substr(s, 1, end - 1)
+                }
+            }
+
+            # Framework fingerprints in service/version output
+            tolower($0) ~ /express|django|flask|fastapi|uvicorn|gunicorn|spring|laravel|rails|graphql|swagger|openapi|asp\.net|kestrel|node\.js|restify|hapi|koa|next\.js|nuxt|tomcat|jetty|werkzeug|tornado|aiohttp|actix|gin-gonic|fiber|echo|chi|gorilla/ {
+                if (/product=/ || /extrainfo=/ || /version=/) {
+                    info = $0
+                    gsub(/.*product="/, "", info)
+                    gsub(/".*/, "", info)
+                    if (ip != "" && port != "") {
+                        print "[Tier 1] Framework: " ip ":" port " " info
+                    }
+                }
+            }
+
+            # NSE http-headers: detect API-related headers
+            /id="http-headers"/ || /http-headers/ { in_headers = 1 }
+            in_headers && /(Access-Control-Allow-Origin|X-Powered-By|X-API-Version|X-RateLimit|X-Request-Id|Content-Type.*application\/json)/ {
+                line = $0
+                gsub(/^[[:space:]]+/, "", line)
+                if (ip != "" && port != "") {
+                    print "[Tier 1] Header: " ip ":" port " " line
+                }
+            }
+
+            # NSE http-title: detect API documentation pages
+            /id="http-title"/ || /http-title/ {
+                if (/output=/) {
+                    s = $0
+                    idx = index(s, "output=\"")
+                    if (idx > 0) {
+                        s = substr(s, idx + 8)
+                        end = index(s, "\"")
+                        if (end > 0) {
+                            title = substr(s, 1, end - 1)
+                            ltitle = tolower(title)
+                            if (ltitle ~ /swagger|api.doc|graphql.playground|redoc|rapidoc|graphiql|api.explorer|openapi/) {
+                                if (ip != "" && port != "") {
+                                    print "[Tier 1] Title: " ip ":" port " " title
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            # NSE http-robots.txt: detect API paths in disallow rules
+            /id="http-robots"/ || /http-robots/ { in_robots = 1 }
+            in_robots && /\/api/ {
+                line = $0
+                gsub(/^[[:space:]]+/, "", line)
+                if (ip != "" && port != "") {
+                    print "[Tier 1] Robots: " ip ":" port " " line
+                }
+            }
+
+            /<\/script>/ { in_headers = 0; in_robots = 0 }
+        ' "./results/${dirname}"/*.xml >> "$api_details_file" 2>/dev/null
+
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$api_details_file" 2>/dev/null | \
+            sort -u >> "$api_servers_file"
+    fi
+
+    local tier1_count=0
+    if [ -s "$api_servers_file" ]; then
+        tier1_count=$(wc -l < "$api_servers_file")
+    fi
+    echo "[Tier 1] Found $tier1_count host(s) with API indicators in nmap output"
+
+    # --- TIER 2: Targeted curl probing of known API paths ---
+    echo "[Tier 2] Probing HTTP/HTTPS hosts for API endpoints..."
+
+    local probe_targets_file
+    probe_targets_file=$(mktemp)
+    for svc_file in http_servers.txt https_servers.txt ssl_servers.txt; do
+        if [ -s "${api_output_dir}/${svc_file}" ]; then
+            cat "${api_output_dir}/${svc_file}" >> "$probe_targets_file"
+        fi
+    done
+    sort -u -o "$probe_targets_file" "$probe_targets_file"
+
+    local target_count=0
+    if [ -s "$probe_targets_file" ]; then
+        target_count=$(wc -l < "$probe_targets_file")
+    fi
+
+    if [ "$target_count" -eq 0 ]; then
+        echo "[Tier 2] No HTTP/HTTPS hosts found to probe"
+        rm -f "$probe_targets_file"
+    else
+        echo "[Tier 2] Probing ${target_count} HTTP/HTTPS host(s)..."
+
+        local api_paths=(
+            "/api"
+            "/api/v1"
+            "/api/v2"
+            "/swagger.json"
+            "/swagger-ui.html"
+            "/openapi.json"
+            "/v3/api-docs"
+            "/graphql"
+            "/.well-known/openid-configuration"
+            "/health"
+            "/healthz"
+            "/status"
+            "/robots.txt"
+        )
+
+        local probe_count=0
+        local total_probes=$(( target_count * (${#api_paths[@]} + 1) ))  # +1 for root header check
+        local max_parallel=10
+        local active_jobs=0
+
+        _probe_target() {
+            local target="$1"
+            local details_file="$2"
+            local servers_file="$3"
+            local ip port proto
+            ip="${target%%:*}"
+            port="${target##*:}"
+
+            # Determine protocol based on port
+            proto="http"
+            if [ "$port" = "443" ] || [ "$port" = "8443" ] || [ "$port" = "990" ]; then
+                proto="https"
+            fi
+
+            local consecutive_failures=0
+
+            local root_response
+            root_response=$(curl -sk --max-time 5 -D - -o /dev/null \
+                -w "\n__STATUS__%{http_code}|%{content_type}" \
+                "${proto}://${ip}:${port}/" 2>/dev/null || echo "__STATUS__000|")
+
+            local root_status
+            root_status=$(echo "$root_response" | grep '__STATUS__' | sed 's/__STATUS__//' | cut -d'|' -f1)
+            local root_ctype
+            root_ctype=$(echo "$root_response" | grep '__STATUS__' | sed 's/__STATUS__//' | cut -d'|' -f2)
+
+            if [ "$root_status" = "000" ]; then
+                consecutive_failures=$((consecutive_failures + 1))
+            else
+                consecutive_failures=0
+                # Check for API headers in root response
+                if echo "$root_response" | grep -qiE '(Access-Control-Allow-Origin|X-API-Version|X-RateLimit|X-Request-Id)'; then
+                    echo "[Tier 2] API headers on root: ${ip}:${port}" >> "$details_file"
+                    echo "${ip}:${port}" >> "$servers_file"
+                fi
+                # Check if root returns JSON
+                if echo "$root_ctype" | grep -qiE 'json'; then
+                    echo "[Tier 2] ${ip}:${port}/ [${root_status}] ${root_ctype}" >> "$details_file"
+                    echo "${ip}:${port}/" >> "$servers_file"
+                fi
+            fi
+
+            # Probe each API path
+            local path
+            for path in "${api_paths[@]}"; do
+                if [ "$consecutive_failures" -ge 2 ]; then
+                    echo "[Tier 2] ${ip}:${port} circuit breaker tripped (${consecutive_failures} failures), skipping remaining paths" >> "$details_file"
+                    break
+                fi
+
+                local url="${proto}://${ip}:${port}${path}"
+                local response
+                response=$(curl -sk --max-time 5 -o /dev/null \
+                    -w "%{http_code}|%{content_type}" \
+                    "${url}" 2>/dev/null || echo "000|")
+
+                local status_code content_type
+                status_code="${response%%|*}"
+                content_type="${response#*|}"
+
+                if [ "$status_code" = "000" ]; then
+                    consecutive_failures=$((consecutive_failures + 1))
+                    continue
+                else
+                    consecutive_failures=0
+                fi
+
+                if [ "$status_code" = "404" ] || [ "$status_code" = "503" ]; then
+                    continue
+                fi
+
+                echo "[Tier 2] ${ip}:${port}${path} [${status_code}] ${content_type}" >> "$details_file"
+
+                if echo "$content_type" | grep -qiE 'json|xml'; then
+                    echo "${ip}:${port}${path}" >> "$servers_file"
+                elif [[ "$path" != "/robots.txt" && "$path" != "/status" && "$path" != "/health" && "$path" != "/healthz" ]]; then
+                    # Known API paths returning 2xx or auth-required response
+                    if [[ "$status_code" =~ ^2[0-9][0-9]$ || "$status_code" == "401" || "$status_code" == "403" ]]; then
+                        echo "${ip}:${port}${path}" >> "$servers_file"
+                    fi
+                fi
+            done
+        }
+
+        while IFS= read -r target; do
+            _probe_target "$target" "$api_details_file" "$api_servers_file" &
+            active_jobs=$((active_jobs + 1))
+
+            if [ "$active_jobs" -ge "$max_parallel" ]; then
+                wait -n 2>/dev/null || wait
+                active_jobs=$((active_jobs - 1))
+            fi
+        done < "$probe_targets_file"
+
+        wait
+
+        echo "  [Tier 2] Probed ${target_count} host(s) with ${#api_paths[@]} paths each (parallel, max ${max_parallel})...Done."
+        rm -f "$probe_targets_file"
+    fi
+
+    if [ -s "$api_servers_file" ]; then
+        sort -u -o "$api_servers_file" "$api_servers_file"
+        cat "$api_servers_file" >> "$global_api_file"
+        local total_endpoints
+        total_endpoints=$(wc -l < "$api_servers_file")
+        DISCOVERED_API_ENDPOINTS=$((DISCOVERED_API_ENDPOINTS + total_endpoints))
+        echo "API Detection Complete: $total_endpoints endpoint(s) discovered"
+    else
+        echo "API Detection Complete: No API endpoints detected"
+    fi
+
+    echo "  Details: $api_details_file"
+    echo "  Endpoints: $api_servers_file"
+    echo "--- End API Detection ---"
+}
+
 for CIDR in "${CIDR_RANGES[@]}"; do
 track_phase_progress "Masscan scanning" "$CIDR"
 echo "Scanning $CIDR..."
@@ -734,13 +1501,22 @@ if [ "$UDP_SCAN" -eq 1 ]; then
 fi
 
 track_phase_progress "TCP enumeration" "$CIDR"
-#Then nmap TCP against masscan-discovered hosts:
+NSE_SCRIPT_ARGS=""
+if [ "$API_SCAN" -eq 1 ]; then
+    NSE_SCRIPT_ARGS="--script=http-headers,http-title,http-robots.txt,http-server-header"
+fi
+
 while read -r TARGET; do
     IP="$(echo "$TARGET" | awk -F: '{print $1}')"
     PORT="$(echo "$TARGET" | awk -F: '{print $2}')"
     FILENAME="$(echo "$IP" | awk '{print "nmap_"$1}')"
     echo -e "\nBeginning in-depth TCP scan of $IP on port(s) $PORT:\n"
-    nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$PORT" -oA "./results/${DIRNAME}/${FILENAME}_tcp" "$IP"
+
+    if [ -n "$NSE_SCRIPT_ARGS" ] && echo "$PORT" | grep -qE '(^|,)(80|443|8080|8443|8000|8888|3000|5000|9090)(,|$)'; then
+        nmap -v --open -sV --version-light -sT -O -Pn -T3 "$NSE_SCRIPT_ARGS" -p "$PORT" -oA "./results/${DIRNAME}/${FILENAME}_tcp" "$IP"
+    else
+        nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$PORT" -oA "./results/${DIRNAME}/${FILENAME}_tcp" "$IP"
+    fi
 
     # Update progress bar
     CURRENT_HOST=$((CURRENT_HOST + 1))
@@ -780,6 +1556,12 @@ if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
             DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + $(wc -l < "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt")))
         fi
     done
+fi
+
+# ===== API ENDPOINT DETECTION =====
+if [ "$API_SCAN" -eq 1 ]; then
+    track_phase_progress "API endpoint detection" "$CIDR"
+    detect_api_endpoints "$DIRNAME"
 fi
 
 track_phase_progress "Domain resolution" "$CIDR"
@@ -892,6 +1674,13 @@ echo -e "\nScan Summary:"
 echo "Total IPs Scanned: $TOTAL_IPS"
 echo "Responsive IPs: $RESPONSIVE_IPS"
 echo "Discovered Services: $DISCOVERED_SERVICES"
+if [ "$API_SCAN" -eq 1 ]; then
+    echo "API Endpoints Discovered: $DISCOVERED_API_ENDPOINTS"
+fi
+echo ""
+echo "Features used:"
+echo "  UDP Scanning: $([ "$UDP_SCAN" -eq 1 ] && echo 'Enabled' || echo 'Disabled')"
+echo "  API Detection: $([ "$API_SCAN" -eq 1 ] && echo 'Enabled' || echo 'Disabled')"
 
 echo -e "\n【 Powering down ScanCannon. Please check for any personal belongings before exiting the shell 】"
 

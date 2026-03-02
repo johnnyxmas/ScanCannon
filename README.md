@@ -1,10 +1,10 @@
-# ScanCannon v1.3
+# ScanCannon v1.5
 
-![scancannon](https://i.imgur.com/FUvPADq.png)
+![scancannon](https://i.imgur.com/jebggX7.png)
 
-**A Bash script for efficient credential attack surface enumeration and general reconnaissance of massive network ranges.**
+**A Bash script for efficient credentials-based attack surface enumeration and general reconnaissance of massive external network ranges.**
 
-ScanCannon handles the enumeration of extremely large networks (such as The Internet) at high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
+ScanCannon handles the enumeration of extremely large networks (such as The Internet) at high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces and APIs. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
 
 ## Table of Contents
 
@@ -28,6 +28,8 @@ ScanCannon handles the enumeration of extremely large networks (such as The Inte
 
 - **High-speed network enumeration** using masscan for initial discovery
 - **Detailed service detection** using nmap for discovered hosts
+- **API endpoint detection** using nmap NSE scripts and targeted curl probing (with `-a` flag)
+- **Full ASN-based network discovery** — resolves all A records, queries `whois` for CIDR + ASN, then discovers ALL prefixes announced by the ASN via RADB. Works for both `-d` (domain) and `-c` (CIDR) inputs with interactive range selection.
 - **Comprehensive output formats** including flat files for easy import into other tools
 - **Automatic domain/subdomain discovery** from scan results
 - **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.)
@@ -64,81 +66,53 @@ ScanCannon focuses on these high-value services for security assessment:
 
 ## Prerequisites
 
-### Required Software
 
 - **Root/Administrator privileges** (required for raw packet manipulation)
 - **[Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)** - High-speed port scanner
 - **[Nmap v7.0.1+](https://github.com/nmap/nmap)** - Network discovery and security auditing
 - **Standard Unix tools**: `dig`, `whois`, `wget`, `awk`, `sed`
+- **curl** *(optional, required for API endpoint detection with `-a` flag)*
 
-### Installation Commands
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install masscan nmap dnsutils whois wget
-```
-
-**CentOS/RHEL/Fedora:**
-```bash
-sudo yum install masscan nmap bind-utils whois wget
-# or for newer versions:
-sudo dnf install masscan nmap bind-utils whois wget
-```
-
-**macOS (with Homebrew):**
-```bash
-brew install masscan nmap wget
-```
-
-## Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/johnnyxmas/ScanCannon.git
-   cd ScanCannon
-   ```
-
-2. **Make the script executable:**
-   ```bash
-   chmod +x scancannon.sh
-   ```
-
-3. **Verify prerequisites:**
-   ```bash
-   # The script will automatically check for required tools
-   sudo ./scancannon.sh
-   ```
 
 ## Quick Start
-
-### Basic Usage
-
-```bash
-# Scan a single network
-sudo ./scancannon.sh 203.0.113.0/24
-
-# Scan multiple networks from file
-echo "203.0.113.0/24" > targets.txt
-echo "198.51.100.0/24" >> targets.txt
-sudo ./scancannon.sh targets.txt
-
-# Include UDP scanning (slower but more comprehensive)
-sudo ./scancannon.sh -u 203.0.113.0/24
-```
 
 ### Command Syntax
 
 ```bash
-sudo ./scancannon.sh [-u] [CIDR_range | targets_file]
+sudo ./scancannon.sh [-u] [-a] <-d domain | -c CIDR> [...]
 ```
 
-**Options:**
-- `-u` : Perform UDP scan on common ports (53, 161, 500) using nmap (significantly slower)
+At least one `-d` or `-c` flag is **required**. Both flags are repeatable and can be combined.
 
-**Input Formats:**
-- **CIDR range**: `192.168.1.0/24`, `10.0.0.0/16`
-- **Targets file**: Text file with one CIDR range per line
+**Options:**
+- `-d domain` : Discover all networks for a domain (resolves all A records → whois → ASN → RADB prefix lookup; repeatable; accepts URLs too)
+- `-c CIDR` : Discover all networks related to a CIDR (whois → ASN → RADB prefix lookup; repeatable)
+- `-u` : Perform UDP scan on common ports (53, 161, 500) using nmap (significantly slower)
+- `-a` : Perform API endpoint detection on HTTP/HTTPS services (requires `curl`)
+
+Both `-d` and `-c` run full ASN-based network discovery and present an interactive selection menu where you choose which discovered ranges to scan.
+
+### Examples
+
+```bash
+# Scan a network by CIDR (includes ASN discovery of related networks)
+sudo ./scancannon.sh -c 203.0.113.0/24
+
+# Discover all networks for a domain (resolves all IPs → ASN → all announced prefixes)
+sudo ./scancannon.sh -d example.com
+
+# Combine domain + CIDR (both are scanned)
+sudo ./scancannon.sh -d example.com -c 10.0.0.0/24
+
+# Include UDP scanning (slower but more comprehensive)
+sudo ./scancannon.sh -u -d example.com
+
+# Include API endpoint detection
+sudo ./scancannon.sh -a -c 203.0.113.0/24
+
+# Combine all flags
+sudo ./scancannon.sh -ua -d example.com -c 10.0.0.0/24
+```
 
 ## Configuration
 
@@ -177,7 +151,7 @@ ScanCannon automatically prompts for network adapter configuration every time yo
 
 ```bash
 # Every time you run ScanCannon:
-sudo ./scancannon.sh 192.168.1.0/24
+sudo ./scancannon.sh -c 192.168.1.0/24
 
 # You'll always see:
 === Network Adapter Configuration ===
@@ -242,92 +216,6 @@ arp -a | grep $(netstat -rn | grep default | awk '{print $2}')  # Gateway MAC
 
 **Important**: Masscan requires MAC addresses in dash format (aa-bb-cc-dd-ee-ff), not colon format (aa:bb:cc:dd:ee:ff). The automatic configuration handles this conversion, but if configuring manually, ensure you use dashes.
 
-## Usage Examples
-
-### Example 1: Basic Network Scan
-```bash
-# Scan a single /24 network
-sudo ./scancannon.sh 203.0.113.0/24
-
-# If results folder exists, you'll be prompted:
-# [D] Delete existing results and start fresh
-# [M] Merge new results with existing
-# [C] Cancel and exit
-```
-
-### Example 2: Multiple Networks
-```bash
-# Create targets file
-cat > my_targets.txt << EOF
-203.0.113.0/24
-198.51.100.0/24
-192.0.2.0/24
-EOF
-
-# Scan all networks
-sudo ./scancannon.sh my_targets.txt
-```
-
-### Example 3: Include UDP Scan
-```bash
-# Scan with UDP enumeration (DNS, SNMP, VPN)
-sudo ./scancannon.sh -u 203.0.113.0/24
-```
-
-### Example 4: Large Network Scan
-```bash
-# For larger networks, start with lower rate
-# Edit scancannon.conf: rate = 1000.00
-sudo ./scancannon.sh 203.0.113.0/16
-```
-
-## Progress Tracking
-
-ScanCannon v1.3 includes comprehensive progress tracking to provide real-time feedback during long-running scans:
-
-### Visual Progress Features
-
-- **Animated spinner** with Unicode characters for active feedback
-- **Progress bar** showing completion percentage with visual blocks
-- **Phase tracking** displaying current operation (Masscan, TCP enumeration, etc.)
-- **ETA calculations** based on historical performance data
-- **Elapsed time** tracking in minutes and seconds
-- **Target information** showing current CIDR range being processed
-
-### Progress Display Example
-
-```
-⠋ [████████████████░░░░░░░░░░░░░░░░░░░░░░░░] 65% TCP enumeration (192.168.1.0/24)
-[Phase 8/12] TCP enumeration (192.168.1.0/24) | ETA: 14:32:15 | Elapsed: 5m23s
-```
-
-### Progress Phases
-
-ScanCannon tracks progress through these main phases:
-
-1. **Initialization** - Script startup and configuration
-2. **TLD Download** - Updating domain name lists
-3. **Packet Filter Setup** - Configuring network rules
-4. **Masscan Scanning** - High-speed port discovery (per CIDR)
-5. **UDP Scanning** - DNS/SNMP/VPN enumeration (if `-u` flag used)
-6. **TCP Enumeration** - Detailed nmap scanning (per CIDR)
-7. **Service Analysis** - Categorizing discovered services (per CIDR)
-8. **Domain Resolution** - Processing discovered domains (per CIDR)
-9. **Finalizing Results** - Cleanup and report generation
-
-### Progress Files
-
-- **`scancannon_progress.tmp`** - Real-time progress data for external monitoring
-- Progress information persists across interruptions for status checking
-- Automatically cleaned up on completion or cancellation
-
-### Benefits
-
-- **Better planning** - Know how long scans will take
-- **Monitoring capability** - Track progress from external scripts
-- **User experience** - Clear feedback prevents "is it working?" confusion
-- **Debugging aid** - Identify which phase is taking longest
-
 ## Understanding Output
 
 ScanCannon creates organized output in the `results/` directory:
@@ -345,24 +233,20 @@ results/
 │   │   ├── ssh_servers.txt            # SSH servers found
 │   │   ├── http_servers.txt           # Web servers found
 │   │   ├── ftp_servers.txt            # FTP servers found
+│   │   ├── api_servers.txt            # API endpoints found (with -a)
+│   │   ├── api_details.txt            # API detection details (with -a)
 │   │   └── ...                        # Other services
 │   ├── resolved_subdomains.txt        # Discovered domains
 │   └── resolved_root_domains.csv      # Domain details with WHOIS
 ├── all_interesting_servers/           # Combined results
 │   ├── all_ssh_servers.txt            # All SSH servers
 │   ├── all_http_servers.txt           # All web servers
+│   ├── all_api_servers.txt            # All API endpoints (with -a)
 │   └── ...                            # Other combined lists
 ├── all_subdomains.txt                 # All discovered domains
 ├── all_root_domains.csv               # All domain details
 └── dead_networks.txt                  # Unresponsive networks
 ```
-
-### Key Output Files
-
-- **`hosts_and_ports.txt`** - Quick reference of responsive hosts
-- **`interesting_servers/`** - Ready-to-use target lists for specific services
-- **`resolved_subdomains.txt`** - Discovered domains for further enumeration
-- **`nmap_files/`** - Detailed service information for each host
 
 ## Safety & Legal Considerations
 
@@ -387,13 +271,6 @@ results/
 4. **Legal Compliance**: Only scan networks you own or have permission to test
 5. **Backup Configs**: Save working configurations before changes
 
-### Legal and Ethical Use
-
-- **Only scan networks you own or have explicit written permission to test**
-- **Respect rate limits and network capacity**
-- **Follow responsible disclosure for any vulnerabilities found**
-- **Comply with local laws and regulations**
-
 ## Troubleshooting
 
 ### Common Issues
@@ -407,7 +284,7 @@ sudo apt install masscan  # Ubuntu/Debian
 **"ERROR: This script must be run as root"**
 ```bash
 # Run with sudo
-sudo ./scancannon.sh 192.168.1.0/24
+sudo ./scancannon.sh -c 192.168.1.0/24
 ```
 
 **"No IPs are up; skipping nmap"**
@@ -420,23 +297,6 @@ sudo ./scancannon.sh 192.168.1.0/24
 - Reduce the `rate` setting in `scancannon.conf`
 - Check network connectivity
 - Verify target networks are responsive
-
-**"sed: command a expects \ followed by text" (macOS)**
-- This indicates a BSD sed vs GNU sed compatibility issue
-- The script should automatically handle this, but if you see this error, it has been fixed
-- Try running the script again - it should work properly on the second run
-
-**Managing Existing Results**
-- When you run ScanCannon and a `results/` folder already exists, you'll be prompted with three options:
-  - **[D] Delete**: Removes all existing results and starts fresh
-  - **[M] Merge**: Combines new results with existing ones (rescanning same subnets will overwrite files)
-  - **[C] Cancel**: Exits without making changes
-- Choose based on whether you want to preserve previous scan data or start clean
-
-**"cleanup: command not found" when pressing Ctrl+C**
-- This was a function ordering issue that has been fixed
-- The cleanup function is now properly defined before it's called by the interrupt handler
-- Ctrl+C should now properly clean up temporary files and restore network settings
 
 **"bad MAC address" error from masscan**
 - Masscan requires MAC addresses in dash format (aa-bb-cc-dd-ee-ff), not colon format (aa:bb:cc:dd:ee:ff)
@@ -453,6 +313,16 @@ Masscan sacrifices accuracy for speed and may miss responses due to its aggressi
 
 Most enumeration tools try to be comprehensive "one-stop shops" but end up being mediocre at everything. ScanCannon focuses on doing network enumeration exceptionally well and outputs to standard, widely-compatible file formats that work with other specialized tools.
 
+### How does API endpoint detection work?
+
+When the `-a` flag is used, ScanCannon employs a two-tier detection approach:
+
+1. **Tier 1 (Passive):** During nmap TCP enumeration, lightweight NSE scripts (`http-headers`, `http-title`, `http-robots.txt`, `http-server-header`) are added for HTTP ports. The resulting XML output is then parsed for API framework fingerprints (Express, Django, Flask, FastAPI, Spring, etc.), API-related response headers (CORS, `X-API-Version`, JSON content types), and documentation page titles (Swagger UI, GraphQL Playground, etc.).
+
+2. **Tier 2 (Active):** For each discovered HTTP/HTTPS host, `curl` probes 14 well-known API paths including `/api`, `/api/v1`, `/swagger.json`, `/openapi.json`, `/graphql`, and others. Responses are classified as API endpoints based on JSON content types, known API path patterns, and authentication-required responses (401/403).
+
+Results are written to `api_servers.txt` (clean endpoint list) and `api_details.txt` (full detection log with tier indicators).
+
 ### Why do I need root privileges?
 
 Both masscan and nmap require raw socket access for SYN scanning and OS detection, which requires root privileges on Unix systems.
@@ -467,7 +337,7 @@ ScanCannon currently focuses on IPv4 networks. For IPv6 scanning, use nmap direc
 
 ## Known Issues
 
-- **International TLD Detection**: Domain detection for international TLDs (like .co.uk, .io, etc.) may not work reliably due to varying WHOIS output standards
+- **International TLD Detection**: Domain detection for international TLDs (like .co.uk, .io, etc.) may not work reliably due to varying WHOIS output standards (TODO?)
 
 ## License
 
@@ -487,6 +357,6 @@ For the full license text, see [LICENSE](LICENSE).
 
 ---
 
-**ScanCannon v1.3 by J0hnnyXm4s**
+**ScanCannon v1.5 by J0hnnyXm4s**
 
 *"Efficient credential attack surface enumeration and general reconnaissance of massive network ranges"*
