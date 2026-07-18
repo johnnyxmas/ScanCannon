@@ -1,0 +1,27 @@
+name: Lint
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  shellcheck:
+    name: shellcheck + bash syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check (bash -n)
+        run: bash -n scancannon.sh
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # Warnings and errors fail the build; style/info notes do not, so the
+      # gate stays meaningful without being noisy. The script intentionally
+      # targets Bash 3.2 (macOS), so a few 3.2-safe idioms are annotated with
+      # inline `# shellcheck disable=` directives rather than "modernized".
+      - name: Run shellcheck
+        run: shellcheck --severity=warning scancannon.sh

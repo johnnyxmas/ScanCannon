@@ -13,7 +13,7 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.5 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.6 by J0hnnyXm4s ¤]×)¤••\n"
 
 # ===== PROGRESS TRACKING SYSTEM =====
 
@@ -25,17 +25,12 @@ CURRENT_PHASE=0
 SPINNER_CHARS="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 SPINNER_INDEX=0
 
-# Calculate total phases upfront
+# Calculate total phases upfront. Each CIDR is now a single orchestrated phase
+# (the heavy per-CIDR work happens inside scan_cidr), plus a fixed set of
+# setup/finalize phases: init, TLD download, packet filters, finalizing,
+# aggregating, generating report — 6 in total, padded to 8 for headroom.
 calculate_total_phases() {
-    local phases=5  # Setup, validation, TLD download, packet filter setup, cleanup
-    local per_cidr=4  # masscan, nmap, analysis, domains (always)
-    if [ "$UDP_SCAN" -eq 1 ]; then
-        per_cidr=$((per_cidr + 1))  # UDP scan phase
-    fi
-    if [ "$API_SCAN" -eq 1 ]; then
-        per_cidr=$((per_cidr + 1))  # API detection phase
-    fi
-    phases=$((phases + ${#CIDR_RANGES[@]} * per_cidr))
+    local phases=$(( 8 + ${#CIDR_RANGES[@]} ))
     TOTAL_PHASES=$phases
     echo "$phases" > "$PROGRESS_FILE"
     echo "0" >> "$PROGRESS_FILE"  # current phase
@@ -66,7 +61,8 @@ track_phase_progress() {
     local current_target="${2:-}"
     
     CURRENT_PHASE=$((CURRENT_PHASE + 1))
-    local current_time=$(date +%s)
+    local current_time
+    current_time=$(date +%s)
     local elapsed=$((current_time - SCRIPT_START_TIME))
     
     # Calculate ETA
@@ -85,7 +81,8 @@ track_phase_progress() {
     fi
     
     local percent=$((CURRENT_PHASE * 100 / TOTAL_PHASES))
-    
+    [ "$percent" -gt 100 ] && percent=100
+
     # Update progress file
     echo "$CURRENT_PHASE" > "${PROGRESS_FILE}.tmp" && mv "${PROGRESS_FILE}.tmp" "$PROGRESS_FILE"
     echo "$percent" >> "$PROGRESS_FILE"
@@ -142,7 +139,7 @@ fi
 #Help Text:
 function helptext() {
 echo -e "\nScanCannon: a program to enumerate and parse a large range of public networks, primarily for determining potential attack vectors"
-echo "usage: scancannon.sh [-u] [-a] -d domain | -c CIDR | -f file  (at least one required)"
+echo "usage: scancannon.sh [-u] [-a] [-V] [-n target] -d domain | -c CIDR | -f file  (at least one target required)"
 echo ""
 echo "  -d domain  Resolve a domain to its owning CIDR range via whois (repeatable)"
 echo "             Accepts a bare domain (example.com) or URL (https://sub.example.com/path)"
@@ -155,14 +152,27 @@ echo "  -F         Force ASN-based network discovery on -f file entries"
 echo "             (default: file entries scan as-is; use -F to expand them)"
 echo "  -u         Perform UDP scan on common ports (53, 161, 500) using nmap"
 echo "  -a         Perform API endpoint detection on HTTP/HTTPS services (requires curl)"
+echo "             Also harvests TLS certificate SANs to discover more hostnames"
+echo "  -V         CVE hinting: run nmap's 'vulners' NSE against detected versions"
+echo "  -n target  Notify on completion. 'target' is either 'desktop' (macOS/notify-send)"
+echo "             or a webhook URL (ntfy/Slack-style POST, requires curl)"
 echo ""
 echo "  At least one -d, -c, or -f flag is required. You may combine them."
+echo ""
+echo "  Environment tunables:"
+echo "    NMAP_MAX_PARALLEL  hosts scanned concurrently per CIDR (default 4)"
+echo "    DNS_MAX_PARALLEL   domains resolved concurrently        (default 8)"
+echo "    CIDR_MAX_PARALLEL  CIDR ranges scanned concurrently      (default 1)"
+echo "    WHOIS_CACHE_TTL    whois cache lifetime in seconds       (default 86400)"
+echo ""
 echo "  Examples:"
 echo "    scancannon.sh -d example.com"
 echo "    scancannon.sh -c 203.0.113.0/24"
 echo "    scancannon.sh -f CIDRs.txt"
 echo "    scancannon.sh -d https://example.com -c 10.0.0.0/24 -f CIDRs.txt"
-echo "    scancannon.sh -ua -d example.com"
+echo "    scancannon.sh -uaV -d example.com"
+echo "    scancannon.sh -a -n desktop -c 203.0.113.0/24"
+echo "    scancannon.sh -n https://ntfy.sh/my-scans -d example.com"
 }
 
 # Function to validate CIDR notation
@@ -253,6 +263,61 @@ function extract_domain() {
 # ===== NETWORK DISCOVERY ENGINE =====
 # Shared infrastructure for both -d (domain) and -c (CIDR) inputs.
 # Pipeline: IP → whois (CIDR + ASN + Org) → RADB (all ASN prefixes) → interactive selection
+
+# ----- whois with on-disk cache + retry/backoff -----
+# Large ASN sweeps fire many whois queries (network discovery AND per-domain
+# resolution). whois servers routinely rate-limit, producing empty replies and
+# "N/A,N/A,N/A" gaps. cached_whois() serves fresh cached answers, retries with
+# backoff on empty replies, and falls back to a stale cache entry rather than
+# returning nothing. Same argument vector as `whois`, e.g.:
+#     cached_whois 203.0.113.1
+#     cached_whois -h whois.radb.net -- "-i origin AS64500"
+WHOIS_CACHE_DIR="${WHOIS_CACHE_DIR:-./.scancannon_cache/whois}"
+WHOIS_CACHE_TTL="${WHOIS_CACHE_TTL:-86400}"   # seconds; default 1 day
+WHOIS_MAX_RETRIES="${WHOIS_MAX_RETRIES:-3}"
+
+cached_whois() {
+    mkdir -p "$WHOIS_CACHE_DIR" 2>/dev/null || true
+    local key cache_file
+    # Key on the full argument vector so IP and RADB queries don't collide.
+    key=$(printf '%s' "$*" | cksum | awk '{print $1 "_" $2}')
+    cache_file="${WHOIS_CACHE_DIR}/${key}"
+
+    # Serve a fresh, non-empty cache hit.
+    if [ -s "$cache_file" ]; then
+        local now mtime
+        now=$(date +%s)
+        if [ "${MACOS:-0}" -eq 1 ]; then
+            mtime=$(stat -f %m "$cache_file" 2>/dev/null || echo 0)
+        else
+            mtime=$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+        fi
+        if [ $((now - mtime)) -lt "$WHOIS_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+
+    # Query live, retrying with linear backoff on empty replies.
+    local attempt=1 out=""
+    while [ "$attempt" -le "$WHOIS_MAX_RETRIES" ]; do
+        out=$(whois "$@" 2>/dev/null)
+        if [ -n "$out" ]; then
+            printf '%s' "$out" > "$cache_file" 2>/dev/null || true
+            printf '%s' "$out"
+            return 0
+        fi
+        sleep $((attempt * 2))
+        attempt=$((attempt + 1))
+    done
+
+    # All live attempts failed — better a stale answer than none.
+    if [ -s "$cache_file" ]; then
+        cat "$cache_file"
+        return 0
+    fi
+    return 1
+}
 
 # Helper: convert an IP range (start - end) to CIDR notation
 function inetnum_to_cidr() {
@@ -453,7 +518,7 @@ function discover_asn_prefixes() {
     echo "  Querying RADB for all prefixes announced by $asn..."
 
     local radb_output
-    radb_output=$(whois -h whois.radb.net -- "-i origin $asn" 2>/dev/null)
+    radb_output=$(cached_whois -h whois.radb.net -- "-i origin $asn")
 
     if [ -n "$radb_output" ]; then
         while IFS= read -r line; do
@@ -482,7 +547,7 @@ function discover_networks_for_ip() {
 
     echo "  Looking up $ip via whois..."
     local whois_output
-    whois_output=$(whois "$ip" 2>/dev/null)
+    whois_output=$(cached_whois "$ip")
 
     if [ -z "$whois_output" ]; then
         echo "  WARNING: whois returned no data for $ip"
@@ -936,10 +1001,13 @@ function configure_adapter() {
         return
     fi
     
-    # Detect interfaces
+    # Detect interfaces (read loop keeps this Bash 3.2-safe — no mapfile).
     echo "Detecting network interfaces..."
-    local interfaces=($(detect_interfaces))
-    
+    local interfaces=()
+    while IFS= read -r _iface; do
+        [ -n "$_iface" ] && interfaces+=("$_iface")
+    done < <(detect_interfaces)
+
     if [ ${#interfaces[@]} -eq 0 ]; then
         echo "No suitable network interfaces found. Skipping automatic configuration."
         return
@@ -955,9 +1023,10 @@ function configure_adapter() {
     else
         echo "Multiple network interfaces found:"
         for i in "${!interfaces[@]}"; do
-            local details=$(get_interface_details "${interfaces[$i]}")
-            local ip=$(echo "$details" | cut -d'|' -f1)
-            local mac=$(echo "$details" | cut -d'|' -f2)
+            local details ip mac
+            details=$(get_interface_details "${interfaces[$i]}")
+            ip="${details%%|*}"
+            mac="${details##*|}"
             echo "  [$((i+1))] ${interfaces[$i]} - IP: $ip, MAC: $mac"
         done
         echo ""
@@ -972,9 +1041,10 @@ function configure_adapter() {
     fi
     
     # Get interface details
-    local details=$(get_interface_details "$selected_interface")
-    selected_ip=$(echo "$details" | cut -d'|' -f1)
-    selected_mac=$(echo "$details" | cut -d'|' -f2)
+    local details
+    details=$(get_interface_details "$selected_interface")
+    selected_ip="${details%%|*}"
+    selected_mac="${details##*|}"
     
     if [ -z "$selected_ip" ] || [ -z "$selected_mac" ]; then
         echo "Could not determine IP or MAC for interface $selected_interface. Skipping automatic configuration."
@@ -985,9 +1055,12 @@ function configure_adapter() {
     echo "  IP: $selected_ip"
     echo "  MAC: $selected_mac"
     
-    # Detect gateways
+    # Detect gateways (read loop keeps this Bash 3.2-safe — no mapfile).
     echo "Detecting default gateways..."
-    local gateways=($(detect_gateways))
+    local gateways=()
+    while IFS= read -r _gw; do
+        [ -n "$_gw" ] && gateways+=("$_gw")
+    done < <(detect_gateways)
     
     if [ ${#gateways[@]} -eq 0 ]; then
         echo "No default gateway found. Skipping gateway configuration."
@@ -1061,12 +1134,14 @@ configure_adapter
 #Parse command line options
 UDP_SCAN=0
 API_SCAN=0
+CVE_SCAN=0
 FORCE_FILE_DISCOVERY=0
+NOTIFY_TARGET=""
 DOMAIN_ARGS=()
 CIDR_FLAG_ARGS=()
 CIDR_FILE_ARGS=()
 
-while getopts ":uaFd:c:f:" opt; do
+while getopts ":uaVFd:c:f:n:" opt; do
 case ${opt} in
 u )
 UDP_SCAN=1
@@ -1074,8 +1149,14 @@ UDP_SCAN=1
 a )
 API_SCAN=1
 ;;
+V )
+CVE_SCAN=1
+;;
 F )
 FORCE_FILE_DISCOVERY=1
+;;
+n )
+NOTIFY_TARGET="$OPTARG"
 ;;
 d )
 DOMAIN_ARGS+=("$OPTARG")
@@ -1107,6 +1188,17 @@ if [ "$API_SCAN" -eq 1 ]; then
         exit 1
     fi
 fi
+
+# A webhook notify target needs curl; validate up front so the run doesn't
+# silently fail to notify hours later.
+case "$NOTIFY_TARGET" in
+    http://*|https://* )
+        if ! command -v curl >/dev/null 2>&1; then
+            echo "ERROR: curl is required to send webhook notifications (-n <url>). Please install it."
+            exit 1
+        fi
+        ;;
+esac
 
 # Validate exclude file first
 if ! validate_exclude_file; then
@@ -1380,13 +1472,48 @@ TOTAL_IPS=0
 RESPONSIVE_IPS=0
 DISCOVERED_SERVICES=0
 DISCOVERED_API_ENDPOINTS=0
+DISCOVERED_CERT_HOSTS=0
+DISCOVERED_CVE_HINTS=0
+INTERRUPTED=0
+
+# Send a completion/interruption notification if -n was given.
+# Target is either 'desktop' or a webhook URL.
+function send_notification() {
+    local status_msg="$1"
+    local detail="$2"
+    [ -z "$NOTIFY_TARGET" ] && return 0
+    local title="ScanCannon"
+    local body="Scan ${status_msg}. ${detail}"
+    case "$NOTIFY_TARGET" in
+        http://*|https://* )
+            if curl -sf --max-time 10 -H "Title: ${title}" --data-binary "$body" "$NOTIFY_TARGET" >/dev/null 2>&1; then
+                echo "Notification delivered to webhook."
+            else
+                echo "WARNING: notification POST to webhook failed."
+            fi
+            ;;
+        desktop )
+            if [ "$MACOS" -eq 1 ]; then
+                osascript -e "display notification \"${body}\" with title \"${title}\"" >/dev/null 2>&1 || true
+            elif command -v notify-send >/dev/null 2>&1; then
+                notify-send "$title" "$body" >/dev/null 2>&1 || true
+            else
+                echo "WARNING: no desktop notifier available (install notify-send on Linux)."
+            fi
+            ;;
+        * )
+            echo "WARNING: unrecognized -n target '$NOTIFY_TARGET' (expected 'desktop' or a URL)."
+            ;;
+    esac
+}
 
 #Housekeeping function (defined early so it can be called by ctrl_c)
 function cleanup() {
 echo -e "\nPerforming cleanup. . . "
 cleanup_progress
-# Check if paused.conf exists before removing
-if [ -f ./paused.conf ]; then
+# Preserve masscan's paused.conf when interrupted so the scan can be resumed
+# later (masscan --resume paused.conf). Only remove it on a clean finish.
+if [ -f ./paused.conf ] && [ "$INTERRUPTED" -eq 0 ]; then
     rm ./paused.conf
 fi
 for DIRECTORY in ./results/*/; do
@@ -1409,8 +1536,14 @@ chmod -R 776 "./results"
 
 # Handle Ctrl+C
 function ctrl_c() {
+INTERRUPTED=1
 echo -e "\n\n[!] Ctrl+C detected. Cleaning up..."
 cleanup
+if [ -f ./paused.conf ]; then
+    echo "masscan state saved to ./paused.conf — resume later with: masscan --resume paused.conf"
+    echo "Or re-run ScanCannon and choose 'Merge' to continue with unfinished CIDRs."
+fi
+send_notification "interrupted" "Run was cancelled before completion."
 echo -e "Exiting."
 exit 0
 }
@@ -1422,7 +1555,6 @@ function detect_api_endpoints() {
     local api_output_dir="./results/${dirname}/interesting_servers"
     local api_details_file="${api_output_dir}/api_details.txt"
     local api_servers_file="${api_output_dir}/api_servers.txt"
-    local global_api_file="./results/all_interesting_servers/all_api_servers.txt"
 
     mkdir -p "$api_output_dir"
     echo "=== API Endpoint Detection ===" > "$api_details_file"
@@ -1561,8 +1693,6 @@ function detect_api_endpoints() {
             "/robots.txt"
         )
 
-        local probe_count=0
-        local total_probes=$(( target_count * (${#api_paths[@]} + 1) ))  # +1 for root header check
         local max_parallel=10
         local active_jobs=0
 
@@ -1669,12 +1799,13 @@ function detect_api_endpoints() {
         rm -f "$probe_targets_file"
     fi
 
+    # Note: the per-CIDR api_servers.txt is the source of truth. Global
+    # aggregation (into all_api_servers.txt) and the summary count happen once,
+    # after all CIDRs finish, so this stays correct under parallel CIDR scans.
     if [ -s "$api_servers_file" ]; then
         sort -u -o "$api_servers_file" "$api_servers_file"
-        cat "$api_servers_file" >> "$global_api_file"
         local total_endpoints
         total_endpoints=$(wc -l < "$api_servers_file")
-        DISCOVERED_API_ENDPOINTS=$((DISCOVERED_API_ENDPOINTS + total_endpoints))
         echo "API Detection Complete: $total_endpoints endpoint(s) discovered"
     else
         echo "API Detection Complete: No API endpoints detected"
@@ -1685,273 +1816,472 @@ function detect_api_endpoints() {
     echo "--- End API Detection ---"
 }
 
-for CIDR in "${CIDR_RANGES[@]}"; do
-track_phase_progress "Masscan scanning" "$CIDR"
-echo "Scanning $CIDR..."
-#make results directories named after subnet:
-# Handle special characters in directory names
-DIRNAME="$(echo "$CIDR" | sed -e 's/\//_/g' -e 's/ /_/g' -e 's/[^a-zA-Z0-9_.-]/_/g')"
-echo "Creating results directory for $CIDR. . ."
-mkdir -p "./results/$DIRNAME"
-#Start Masscan. Write to binary file so users can --readscan it to whatever they need later:
-echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***"
-# Quote variables to handle spaces and special characters
-masscan -c scancannon.conf --open --source-port 40000 -oB "./results/${DIRNAME}/masscan_output.bin" "$CIDR"
-masscan --readscan "./results/${DIRNAME}/masscan_output.bin" -oL "./results/${DIRNAME}/masscan_output.txt"
-
-#Update total IPs scanned
-# Fix IP calculation with error handling
-TOTAL_IPS=$((TOTAL_IPS + $(echo "$CIDR" | awk -F/ '{
-    if (NF > 1 && $2 != "") {
-        print 2^(32-$2)
-    } else {
-        print 1  # Default to 1 if CIDR notation is missing
-    }
-}')))
-
-if [ ! -s "./results/${DIRNAME}/masscan_output.txt" ]; then
-    echo -e "\nNo IPs are up; skipping nmap. This was a big waste of time.\n"
-    continue
-fi
-
-#Consolidate IPs and open ports for each IP:
-awk '/open/ {print $4,$3,$2,$1}' "./results/${DIRNAME}/masscan_output.txt" | awk '
-        /.+/{
-            if (!($1 in Val)) { Key[++i] = $1; }
-            Val[$1] = Val[$1] $2 ",";
-            }
-    END{
-        for (j = 1; j <= i; j++) {
-            printf("%s:%s\n%s",  Key[j], Val[Key[j]], (j == i) ? "" : "");
-        }
-    }' | sed 's/,$//' >>"./results/${DIRNAME}/hosts_and_ports.txt"
-
-# The consolidation step above emits exactly one line per unique responsive
-# IP, so the line count is both the host total and the responsive-IP count —
-# no extra awk|sort|wc pass needed.
-TOTAL_HOSTS=$(wc -l < "./results/${DIRNAME}/hosts_and_ports.txt")
-RESPONSIVE_IPS=$((RESPONSIVE_IPS + TOTAL_HOSTS))
-CURRENT_HOST=0
-
-#Run in-depth nmap enumeration against discovered hosts & ports, and output to all formats
-#First we have to do a blind UDP nmap scan of common ports, as masscan does not support UDP. Note we Ping here to reduce scan time.
-if [ "$UDP_SCAN" -eq 1 ]; then
-    track_phase_progress "UDP scanning" "$CIDR"
-    echo -e "\nStarting DNS, SNMP and VPN scan against all hosts"
-    nmap -v --open -sV --version-light -sU -T3 -p 53,161,500 -oA "./results/${DIRNAME}/nmap_${DIRNAME}_udp" "$CIDR"
-fi
-
-track_phase_progress "TCP enumeration" "$CIDR"
-NSE_SCRIPT_ARGS=""
-if [ "$API_SCAN" -eq 1 ]; then
-    NSE_SCRIPT_ARGS="--script=http-headers,http-title,http-robots.txt,http-server-header"
-fi
-
-# Run one nmap per host. These are independent, so scan several hosts
-# concurrently (bounded) instead of strictly serially — the dominant cost
-# of a run is here. Tune with NMAP_MAX_PARALLEL (default 4).
-NMAP_MAX_PARALLEL="${NMAP_MAX_PARALLEL:-4}"
-
-_scan_host() {
-    local target="$1"
-    # Split "IP:PORT" with parameter expansion — no subprocess needed.
-    local ip="${target%%:*}"
-    local port="${target#*:}"
-    local filename="nmap_${ip}"
-    echo -e "\nBeginning in-depth TCP scan of $ip on port(s) $port:\n"
-
-    # Add NSE http scripts only when an HTTP-ish port is present (bash regex,
-    # no echo|grep subprocess).
-    if [ -n "$NSE_SCRIPT_ARGS" ] && [[ ",$port," =~ ,(80|443|8080|8443|8000|8888|3000|5000|9090), ]]; then
-        nmap -v --open -sV --version-light -sT -O -Pn -T3 "$NSE_SCRIPT_ARGS" -p "$port" -oA "./results/${DIRNAME}/${filename}_tcp" "$ip"
-    else
-        nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$port" -oA "./results/${DIRNAME}/${filename}_tcp" "$ip"
-    fi
-}
-
-active_jobs=0
-while read -r TARGET; do
-    [ -z "$TARGET" ] && continue
-    _scan_host "$TARGET" &
-    active_jobs=$((active_jobs + 1))
-
-    if [ "$active_jobs" -ge "$NMAP_MAX_PARALLEL" ]; then
-        wait -n 2>/dev/null || wait
-        active_jobs=$((active_jobs - 1))
-        CURRENT_HOST=$((CURRENT_HOST + 1))
-        PROGRESS=$((CURRENT_HOST * 100 / TOTAL_HOSTS))
-        echo -ne "\rProgress: [$PROGRESS%] [$CURRENT_HOST/$TOTAL_HOSTS] hosts scanned..."
-    fi
-done <"./results/${DIRNAME}/hosts_and_ports.txt"
-
-# Drain any remaining background scans.
-wait
-echo -ne "\rProgress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n"
-
-track_phase_progress "Service analysis" "$CIDR"
-#Generate lists of Hosts:Ports hosting Interesting Services™️ for importing into cred stuffers (or other tools)
-mkdir -p "./results/${DIRNAME}/interesting_servers/"
-mkdir -p "./results/all_interesting_servers/"
-#(if you add to this service list, make sure you also add it to the master file generation list at the end.)
-# Check if gnmap files exist before processing all services
+# Services considered "interesting" — shared by the per-CIDR classifier, the
+# aggregation step, and the report. (Add here to extend coverage everywhere.)
 SERVICE_LIST="domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https"
-if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-    INTERESTING_DIR="./results/${DIRNAME}/interesting_servers"
-    # Classify every service in a SINGLE pass over the gnmap files (previously
-    # this scanned the files once per service). Each match is written straight
-    # to that service's output file from within awk.
-    awk -v services="$SERVICE_LIST" -v outdir="$INTERESTING_DIR" '
-        BEGIN { n = split(services, svc, " ") }
-        /open/ {
-            ip = $2
-            if (ip == "") { next }
-            # Each port token is "port/state/proto/owner/service/rpc/version".
-            # nmap leaves owner empty ("//"), so the service name lives in
-            # field 5. Split once per token and match on that field directly,
-            # instead of a brittle whole-token regex that never fired against
-            # real nmap output.
-            for (i = 3; i <= NF; i++) {
-                m = split($i, port_parts, "/")
-                if (m < 5) { continue }
-                if (port_parts[2] != "open") { continue }
-                if (port_parts[1] !~ /^[0-9]+$/) { continue }
-                svc_field = port_parts[5]
-                if (svc_field == "") { continue }
-                for (s = 1; s <= n; s++) {
-                    if (index(svc_field, svc[s]) > 0) {
-                        fname = outdir "/" svc[s] "_servers.txt"
-                        print ip ":" port_parts[1] > fname
-                    }
-                }
+
+# ===== PER-CIDR SCAN PIPELINE =====
+# Everything for one CIDR lives in this function so ranges can be scanned
+# serially OR concurrently. It mutates NO shell globals: per-CIDR counts are
+# written to results/<dir>/.stats and summed afterward by aggregate_results,
+# so totals stay correct even when CIDRs run in parallel subshells.
+scan_cidr() {
+    local CIDR="$1"
+    local worker_idx="${2:-0}"
+    local DIRNAME
+    DIRNAME="$(printf '%s' "$CIDR" | sed -e 's/\//_/g' -e 's/ /_/g' -e 's/[^a-zA-Z0-9_.-]/_/g')"
+    mkdir -p "./results/$DIRNAME"
+
+    # Resume checkpoint: skip a CIDR that already finished (Merge re-runs).
+    if [ -f "./results/${DIRNAME}/.scan_complete" ]; then
+        echo "  [resume] $CIDR already complete — skipping (rm ./results/${DIRNAME}/.scan_complete to force)."
+        return 0
+    fi
+
+    # Addressable IPs in this CIDR (for the summary).
+    local cidr_ips
+    cidr_ips=$(printf '%s' "$CIDR" | awk -F/ '{ if (NF>1 && $2!="") print 2^(32-$2); else print 1 }')
+
+    # Distinct source port per worker (inside the firewalled 40000-41023 band).
+    local src_port=$((40000 + (worker_idx % 1024)))
+
+    echo "Scanning $CIDR ..."
+    echo -e "\n*** Firing ScanCannon. Please keep arms and legs inside the chamber at all times ***"
+    masscan -c scancannon.conf --open --rate "$MASSCAN_RATE_SHARE" --source-port "$src_port" -oB "./results/${DIRNAME}/masscan_output.bin" "$CIDR"
+    masscan --readscan "./results/${DIRNAME}/masscan_output.bin" -oL "./results/${DIRNAME}/masscan_output.txt"
+
+    if [ ! -s "./results/${DIRNAME}/masscan_output.txt" ]; then
+        echo -e "\nNo IPs are up in $CIDR; skipping nmap.\n"
+        printf 'cidr=%s\ntotal_ips=%s\nresponsive_ips=0\nservices=0\napi_endpoints=0\ncert_hosts=0\ncve_hints=0\nstatus=dead\n' \
+            "$CIDR" "$cidr_ips" > "./results/${DIRNAME}/.stats"
+        touch "./results/${DIRNAME}/.scan_complete"
+        return 0
+    fi
+
+    #Consolidate IPs and open ports for each IP (one line per responsive IP):
+    awk '/open/ {print $4,$3,$2,$1}' "./results/${DIRNAME}/masscan_output.txt" | awk '
+            /.+/{
+                if (!($1 in Val)) { Key[++i] = $1 }
+                Val[$1] = Val[$1] $2 ","
             }
-        }
-    ' "./results/${DIRNAME}"/*.gnmap
+        END{ for (j = 1; j <= i; j++) printf("%s:%s\n", Key[j], Val[Key[j]]) }
+        ' | sed 's/,$//' > "./results/${DIRNAME}/hosts_and_ports.txt"
 
-    # Append to global files and tally counts (cheap per-service, no rescans).
-    for SERVICE in $SERVICE_LIST; do
-        service_file="${INTERESTING_DIR}/${SERVICE}_servers.txt"
-        # Preserve prior behavior of always having a (possibly empty) file.
-        [ -f "$service_file" ] || : > "$service_file"
-        if [ -s "$service_file" ]; then
-            cat "$service_file" >> "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
-            DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + $(wc -l < "$service_file")))
-        fi
-    done
-fi
+    local TOTAL_HOSTS CURRENT_HOST
+    TOTAL_HOSTS=$(wc -l < "./results/${DIRNAME}/hosts_and_ports.txt" | tr -d ' ')
+    CURRENT_HOST=0
 
-# ===== API ENDPOINT DETECTION =====
-if [ "$API_SCAN" -eq 1 ]; then
-    track_phase_progress "API endpoint detection" "$CIDR"
-    detect_api_endpoints "$DIRNAME"
-fi
+    #First a blind UDP nmap of common ports (masscan is TCP-only).
+    if [ "$UDP_SCAN" -eq 1 ]; then
+        echo -e "\nStarting DNS, SNMP and VPN UDP scan for $CIDR"
+        nmap -v --open -sV --version-light -sU -T3 -p 53,161,500 -oA "./results/${DIRNAME}/nmap_${DIRNAME}_udp" "$CIDR"
+    fi
 
-track_phase_progress "Domain resolution" "$CIDR"
-#Generate list of discovered sub/domains for this subnet.
-echo "Root Domain,IP,CIDR,AS#,IP Owner" > "./results/${DIRNAME}/resolved_root_domains.csv"
-echo "Root Domain,IP,CIDR,AS#,IP Owner" >> "./results/all_root_domains.csv"
+    # NSE script set:
+    #   ssl-cert : always on (cheap; feeds TLS-cert SAN harvesting below)
+    #   http-*   : only with -a (API detection)
+    #   vulners  : only with -V (CVE hinting; relies on -sV, already enabled)
+    # Every script carries its own portrule, so nmap only runs each where it
+    # applies — listing them all for every host is safe.
+    local scripts="ssl-cert"
+    [ "$API_SCAN" -eq 1 ] && scripts="${scripts},http-headers,http-title,http-robots.txt,http-server-header"
+    [ "$CVE_SCAN" -eq 1 ] && scripts="${scripts},vulners"
+    local nse_arg="--script=${scripts}"
+    local DIRNAME_L="$DIRNAME"
 
-# Check if TLD file exists and has content, and if gnmap files exist
-if [ -s "./all_tlds.txt" ] && ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-    # Optimized domain extraction with single awk pass.
-    # Build a hash of valid TLDs keyed by the bare label, then do an O(1)
-    # lookup on each domain's final label instead of scanning every TLD.
-    awk -F'[()]' '
-        BEGIN {
-            # Read TLD list. Normalize by stripping any leading non-alnum
-            # decoration (e.g. the legacy "[.]" prefix) so both old and new
-            # TLD files work.
-            while ((getline tld < "./all_tlds.txt") > 0) {
-                if (tld ~ /^#/ || tld == "") { continue }
-                tld = tolower(tld)
-                gsub(/^[^a-z0-9]+/, "", tld)   # drop leading "[.]" etc.
-                if (tld != "") { tlds[tld] = 1 }
-            }
-            close("./all_tlds.txt")
-        }
-        {
-            if ($2) {
-                domain = tolower($2)
-                # Anchor on the real final label; O(1) hash lookup.
-                n = split(domain, labels, ".")
-                if (n >= 2 && (labels[n] in tlds)) {
-                    domains[domain] = 1
-                }
-            }
-        }
-        END {
-            for (domain in domains) {
-                print domain
-            }
-        }
-    ' "./results/${DIRNAME}"/*.gnmap | sort -u > "./results/${DIRNAME}/resolved_subdomains.txt"
-    
-    # Append to global file
-    cat "./results/${DIRNAME}/resolved_subdomains.txt" >> "./results/all_subdomains.txt"
-else
-    # Create empty files if TLD processing can't be done
-    touch "./results/${DIRNAME}/resolved_subdomains.txt"
-fi
-# Only process domains if subdomain file exists and has content
-if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
-    # Create temporary file for batch processing
-    temp_domains=$(mktemp)
-    # Each domain's dig+whois are independent network round-trips (and whois
-    # is often slow/rate-limited), so resolve several concurrently. Each job
-    # writes to its own file to avoid interleaved/corrupted lines; results are
-    # concatenated afterward. Tune with DNS_MAX_PARALLEL (default 8).
-    resolve_dir=$(mktemp -d)
-    DNS_MAX_PARALLEL="${DNS_MAX_PARALLEL:-8}"
-
-    _resolve_root_domain() {
-        local domain="$1"
-        local outfile="$2"
-        local dig
-        dig="$(dig "$domain" +short)"
-        [ -z "$dig" ] && return 0
-        # More robust whois parsing
-        local whois_csv
-        whois_csv="$(whois "$dig" | awk -F':[ ]*' '
-                /CIDR:/ { cidr = $2 };
-                /Organization:/ { org = $2 };
-                /OriginAS:/ { asn = $2 }
-                END {
-                    if (cidr != "" || asn != "" || org != "") {
-                        printf "%s,%s,%s", cidr, asn, org
-                    } else {
-                        print "N/A,N/A,N/A"
-                    }
-                }')"
-        printf '%s,%s,%s\n' "$domain" "$dig" "$whois_csv" > "$outfile"
+    # Run one nmap per host, several hosts concurrently (NMAP_MAX_PARALLEL).
+    _scan_host() {
+        local target="$1"
+        local ip="${target%%:*}"
+        local port="${target#*:}"
+        echo -e "\nBeginning in-depth TCP scan of $ip on port(s) $port:\n"
+        nmap -v --open -sV --version-light -sT -O -Pn -T3 "$nse_arg" -p "$port" -oA "./results/${DIRNAME_L}/nmap_${ip}_tcp" "$ip"
     }
 
-    # Extract unique root domains and resolve them in parallel.
-    active_jobs=0
-    domain_idx=0
-    while IFS= read -r DOMAIN; do
-        [ -z "$DOMAIN" ] && continue
-        domain_idx=$((domain_idx + 1))
-        _resolve_root_domain "$DOMAIN" "${resolve_dir}/${domain_idx}" &
+    local active_jobs=0
+    while read -r TARGET; do
+        [ -z "$TARGET" ] && continue
+        _scan_host "$TARGET" &
         active_jobs=$((active_jobs + 1))
-        if [ "$active_jobs" -ge "$DNS_MAX_PARALLEL" ]; then
+        if [ "$active_jobs" -ge "$NMAP_MAX_PARALLEL" ]; then
             wait -n 2>/dev/null || wait
             active_jobs=$((active_jobs - 1))
+            CURRENT_HOST=$((CURRENT_HOST + 1))
+            PROGRESS=$((CURRENT_HOST * 100 / TOTAL_HOSTS))
+            echo -ne "\r[$CIDR] Progress: [$PROGRESS%] [$CURRENT_HOST/$TOTAL_HOSTS] hosts scanned..."
         fi
-    done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt" | sort -u)
+    done <"./results/${DIRNAME}/hosts_and_ports.txt"
     wait
+    echo -ne "\r[$CIDR] Progress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n"
 
-    # Gather per-job results in a stable order.
-    cat "${resolve_dir}"/* 2>/dev/null >> "$temp_domains"
-    rm -rf "$resolve_dir"
+    #Classify Interesting Services™️ in a SINGLE pass over the gnmap files.
+    #Per-CIDR files only; global aggregation runs after all CIDRs finish.
+    mkdir -p "./results/${DIRNAME}/interesting_servers/"
+    local svc_count=0
+    if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
+        local INTERESTING_DIR="./results/${DIRNAME}/interesting_servers"
+        # nmap gnmap ports are "port/state/proto/owner/service/rpc/version"; the
+        # service name is field 5 (owner is usually empty). Match on that field.
+        awk -v services="$SERVICE_LIST" -v outdir="$INTERESTING_DIR" '
+            BEGIN { n = split(services, svc, " ") }
+            /open/ {
+                ip = $2
+                if (ip == "") { next }
+                for (i = 3; i <= NF; i++) {
+                    m = split($i, port_parts, "/")
+                    if (m < 5) { continue }
+                    if (port_parts[2] != "open") { continue }
+                    if (port_parts[1] !~ /^[0-9]+$/) { continue }
+                    svc_field = port_parts[5]
+                    if (svc_field == "") { continue }
+                    for (s = 1; s <= n; s++) {
+                        if (index(svc_field, svc[s]) > 0) {
+                            fname = outdir "/" svc[s] "_servers.txt"
+                            print ip ":" port_parts[1] > fname
+                        }
+                    }
+                }
+            }
+        ' "./results/${DIRNAME}"/*.gnmap
 
-    # Append batch results to both files
-    if [ -s "$temp_domains" ]; then
-        cat "$temp_domains" >> "./results/${DIRNAME}/resolved_root_domains.csv"
-        cat "$temp_domains" >> "./results/all_root_domains.csv"
+        local SERVICE service_file
+        for SERVICE in $SERVICE_LIST; do
+            service_file="${INTERESTING_DIR}/${SERVICE}_servers.txt"
+            [ -f "$service_file" ] || : > "$service_file"
+            if [ -s "$service_file" ]; then
+                sort -u -o "$service_file" "$service_file"
+                svc_count=$((svc_count + $(wc -l < "$service_file")))
+            fi
+        done
     fi
-    
-    rm -f "$temp_domains"
+
+    # ===== API ENDPOINT DETECTION =====
+    local api_count=0
+    if [ "$API_SCAN" -eq 1 ]; then
+        detect_api_endpoints "$DIRNAME"
+        [ -s "./results/${DIRNAME}/interesting_servers/api_servers.txt" ] && \
+            api_count=$(wc -l < "./results/${DIRNAME}/interesting_servers/api_servers.txt" | tr -d ' ')
+    fi
+
+    # ===== TLS CERTIFICATE SAN HARVESTING =====
+    # Pull DNS names from ssl-cert NSE output. These frequently reveal hostnames
+    # (and sibling domains) that PTR records miss, and they feed the domain
+    # resolution below to enrich discovered-domain output.
+    : > "./results/${DIRNAME}/cert_sans.txt"
+    if ls "./results/${DIRNAME}"/*.nmap >/dev/null 2>&1; then
+        # '|| true': grep exits non-zero when a CIDR has no certs, which would
+        # otherwise abort the run under 'set -e'/pipefail.
+        grep -hoiE 'DNS:[^,[:space:]]+' "./results/${DIRNAME}"/*.nmap 2>/dev/null \
+            | sed -e 's/^[Dd][Nn][Ss]://' -e 's/^\*\.//' \
+            | tr 'A-Z' 'a-z' | sort -u > "./results/${DIRNAME}/cert_sans.txt" || true
+    fi
+    local cert_hosts=0
+    [ -s "./results/${DIRNAME}/cert_sans.txt" ] && cert_hosts=$(wc -l < "./results/${DIRNAME}/cert_sans.txt" | tr -d ' ')
+
+    # ===== CVE HINTS (count unique CVE IDs found by the vulners NSE) =====
+    local cve_hints=0
+    if [ "$CVE_SCAN" -eq 1 ] && ls "./results/${DIRNAME}"/*.nmap >/dev/null 2>&1; then
+        # '|| true' so a CIDR with zero CVE hits doesn't abort under 'set -e'.
+        cve_hints=$( { grep -hoiE 'CVE-[0-9]{4}-[0-9]+' "./results/${DIRNAME}"/*.nmap 2>/dev/null | sort -u | wc -l | tr -d ' '; } || true )
+    fi
+
+    # ===== DOMAIN RESOLUTION =====
+    echo "Root Domain,IP,CIDR,AS#,IP Owner" > "./results/${DIRNAME}/resolved_root_domains.csv"
+    : > "./results/${DIRNAME}/resolved_subdomains.txt"
+    if [ -s "./all_tlds.txt" ] && ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
+        awk -F'[()]' '
+            BEGIN {
+                while ((getline tld < "./all_tlds.txt") > 0) {
+                    if (tld ~ /^#/ || tld == "") { continue }
+                    tld = tolower(tld); gsub(/^[^a-z0-9]+/, "", tld)
+                    if (tld != "") { tlds[tld] = 1 }
+                }
+                close("./all_tlds.txt")
+            }
+            { if ($2) { domain = tolower($2); n = split(domain, labels, "."); if (n >= 2 && (labels[n] in tlds)) domains[domain] = 1 } }
+            END { for (domain in domains) print domain }
+        ' "./results/${DIRNAME}"/*.gnmap | sort -u > "./results/${DIRNAME}/resolved_subdomains.txt"
+    fi
+    # Fold harvested TLS-cert SAN hostnames into the subdomain set so they get
+    # resolved/whois'd too — this is the cert data feeding back into discovery.
+    if [ -s "./results/${DIRNAME}/cert_sans.txt" ]; then
+        cat "./results/${DIRNAME}/cert_sans.txt" >> "./results/${DIRNAME}/resolved_subdomains.txt"
+        sort -u -o "./results/${DIRNAME}/resolved_subdomains.txt" "./results/${DIRNAME}/resolved_subdomains.txt"
+    fi
+
+    if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
+        local temp_domains resolve_dir
+        temp_domains=$(mktemp)
+        resolve_dir=$(mktemp -d)
+
+        # Independent, network-bound dig+whois per domain — resolve several at
+        # once (DNS_MAX_PARALLEL); each job writes its own file to avoid mangling.
+        _resolve_root_domain() {
+            local domain="$1" outfile="$2" dig whois_csv
+            dig="$(dig "$domain" +short)"
+            [ -z "$dig" ] && return 0
+            whois_csv="$(cached_whois "$dig" | awk -F':[ ]*' '
+                    /CIDR:/ { cidr = $2 }
+                    /Organization:/ { org = $2 }
+                    /OriginAS:/ { asn = $2 }
+                    END { if (cidr != "" || asn != "" || org != "") printf "%s,%s,%s", cidr, asn, org; else print "N/A,N/A,N/A" }')"
+            printf '%s,%s,%s\n' "$domain" "$dig" "$whois_csv" > "$outfile"
+        }
+
+        local active_jobs=0 domain_idx=0
+        while IFS= read -r DOMAIN; do
+            [ -z "$DOMAIN" ] && continue
+            domain_idx=$((domain_idx + 1))
+            _resolve_root_domain "$DOMAIN" "${resolve_dir}/${domain_idx}" &
+            active_jobs=$((active_jobs + 1))
+            if [ "$active_jobs" -ge "$DNS_MAX_PARALLEL" ]; then
+                wait -n 2>/dev/null || wait
+                active_jobs=$((active_jobs - 1))
+            fi
+        done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt" | sort -u)
+        wait
+
+        cat "${resolve_dir}"/* 2>/dev/null >> "$temp_domains"
+        rm -rf "$resolve_dir"
+        [ -s "$temp_domains" ] && cat "$temp_domains" >> "./results/${DIRNAME}/resolved_root_domains.csv"
+        rm -f "$temp_domains"
+    fi
+
+    # Persist per-CIDR stats and mark complete (for resume + aggregation).
+    printf 'cidr=%s\ntotal_ips=%s\nresponsive_ips=%s\nservices=%s\napi_endpoints=%s\ncert_hosts=%s\ncve_hints=%s\nstatus=scanned\n' \
+        "$CIDR" "$cidr_ips" "$TOTAL_HOSTS" "$svc_count" "$api_count" "$cert_hosts" "$cve_hints" > "./results/${DIRNAME}/.stats"
+    touch "./results/${DIRNAME}/.scan_complete"
+}
+
+# ===== AGGREGATION =====
+# Rebuild the global all_* files and summary totals from every completed CIDR's
+# per-CIDR outputs. Runs once after scanning, so it is correct regardless of
+# whether CIDRs ran serially or in parallel.
+aggregate_results() {
+    TOTAL_IPS=0; RESPONSIVE_IPS=0; DISCOVERED_SERVICES=0
+    DISCOVERED_API_ENDPOINTS=0; DISCOVERED_CERT_HOSTS=0; DISCOVERED_CVE_HINTS=0
+    mkdir -p "./results/all_interesting_servers"
+
+    : > "./results/all_subdomains.txt"
+    : > "./results/all_cert_sans.txt"
+    : > "./results/all_interesting_servers/all_api_servers.txt"
+    echo "Root Domain,IP,CIDR,AS#,IP Owner" > "./results/all_root_domains.csv"
+    local SERVICE
+    for SERVICE in $SERVICE_LIST; do
+        : > "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+    done
+
+    local d base k v
+    for d in ./results/*/; do
+        base=$(basename "$d")
+        case "$base" in
+            all_interesting_servers|*interesting*) continue ;;
+        esac
+        [ -f "${d}.stats" ] || continue
+        while IFS='=' read -r k v; do
+            case "$k" in
+                total_ips)       TOTAL_IPS=$((TOTAL_IPS + v)) ;;
+                responsive_ips)  RESPONSIVE_IPS=$((RESPONSIVE_IPS + v)) ;;
+                services)        DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + v)) ;;
+                api_endpoints)   DISCOVERED_API_ENDPOINTS=$((DISCOVERED_API_ENDPOINTS + v)) ;;
+                cert_hosts)      DISCOVERED_CERT_HOSTS=$((DISCOVERED_CERT_HOSTS + v)) ;;
+                cve_hints)       DISCOVERED_CVE_HINTS=$((DISCOVERED_CVE_HINTS + v)) ;;
+            esac
+        done < "${d}.stats"
+
+        for SERVICE in $SERVICE_LIST; do
+            [ -s "${d}interesting_servers/${SERVICE}_servers.txt" ] && \
+                cat "${d}interesting_servers/${SERVICE}_servers.txt" >> "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+        done
+        [ -s "${d}interesting_servers/api_servers.txt" ] && cat "${d}interesting_servers/api_servers.txt" >> "./results/all_interesting_servers/all_api_servers.txt"
+        [ -s "${d}resolved_subdomains.txt" ] && cat "${d}resolved_subdomains.txt" >> "./results/all_subdomains.txt"
+        [ -s "${d}cert_sans.txt" ] && cat "${d}cert_sans.txt" >> "./results/all_cert_sans.txt"
+        [ -f "${d}resolved_root_domains.csv" ] && tail -n +2 "${d}resolved_root_domains.csv" >> "./results/all_root_domains.csv"
+    done
+
+    local f
+    for f in "./results/all_subdomains.txt" "./results/all_cert_sans.txt" ./results/all_interesting_servers/all_*_servers.txt; do
+        [ -s "$f" ] && sort -u -o "$f" "$f"
+    done
+    # Return 0 explicitly: the loop above can leave a non-zero status (last file
+    # empty), which would abort the caller under 'set -e'.
+    return 0
+}
+
+# ===== CONSOLIDATED REPORT (HTML + CSV) =====
+# HTML-escape stdin for safe embedding (cert SANs etc. are attacker-influenced).
+_html_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+generate_report() {
+    local report="./results/report.html"
+    local csv="./results/findings.csv"
+    local now
+    now=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+    # ---- findings.csv : service,ip,port ----
+    echo "service,ip,port" > "$csv"
+    local SERVICE f line
+    for SERVICE in $SERVICE_LIST; do
+        f="./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+        [ -s "$f" ] || continue
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            printf '%s,%s,%s\n' "$SERVICE" "${line%%:*}" "${line##*:}" >> "$csv"
+        done < "$f"
+    done
+
+    # ---- report.html ----
+    {
+        cat <<HTMLHEAD
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScanCannon Report</title>
+<style>
+:root{color-scheme:light dark}
+body{font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:0 1rem 4rem;background:#0f1115;color:#e6e6e6}
+@media(prefers-color-scheme:light){body{background:#f7f7f9;color:#1a1a1a}}
+h1{font-size:1.6rem;margin:1.2rem 0 .2rem}h2{font-size:1.15rem;margin:2rem 0 .6rem;border-bottom:1px solid #8883;padding-bottom:.3rem}
+.sub{opacity:.7;font-size:.85rem}
+.cards{display:flex;flex-wrap:wrap;gap:.75rem;margin:1rem 0}
+.card{flex:1 1 130px;background:#1c1f27;border:1px solid #ffffff14;border-radius:10px;padding:.8rem 1rem}
+@media(prefers-color-scheme:light){.card{background:#fff;border-color:#0001}}
+.card .n{font-size:1.5rem;font-weight:700}.card .l{opacity:.7;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em}
+table{border-collapse:collapse;width:100%;margin:.5rem 0;font-size:.9rem}
+th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #8883;vertical-align:top}
+th{opacity:.75;font-weight:600}
+.wrap{overflow-x:auto}
+code{background:#8882;padding:.05rem .3rem;border-radius:4px}
+.empty{opacity:.6;font-style:italic}
+details{margin:.4rem 0}summary{cursor:pointer}
+</style></head><body>
+<h1>ScanCannon Report</h1>
+<div class="sub">Generated $now</div>
+<div class="cards">
+<div class="card"><div class="n">$TOTAL_IPS</div><div class="l">IPs in scope</div></div>
+<div class="card"><div class="n">$RESPONSIVE_IPS</div><div class="l">Responsive IPs</div></div>
+<div class="card"><div class="n">$DISCOVERED_SERVICES</div><div class="l">Service hits</div></div>
+<div class="card"><div class="n">$DISCOVERED_API_ENDPOINTS</div><div class="l">API endpoints</div></div>
+<div class="card"><div class="n">$DISCOVERED_CERT_HOSTS</div><div class="l">Cert SAN hosts</div></div>
+<div class="card"><div class="n">$DISCOVERED_CVE_HINTS</div><div class="l">CVE hints</div></div>
+</div>
+HTMLHEAD
+
+        # Per-CIDR table
+        echo '<h2>Scanned Ranges</h2><div class="wrap"><table>'
+        echo '<tr><th>CIDR</th><th>Status</th><th>Responsive</th><th>Services</th><th>API</th><th>Cert SANs</th><th>CVEs</th></tr>'
+        local d cidr status resp svc api certs cves
+        for d in ./results/*/; do
+            base=$(basename "$d")
+            case "$base" in all_interesting_servers|*interesting*) continue ;; esac
+            [ -f "${d}.stats" ] || continue
+            cidr=""; status=""; resp=0; svc=0; api=0; certs=0; cves=0
+            while IFS='=' read -r k v; do
+                case "$k" in
+                    cidr) cidr="$v" ;; status) status="$v" ;;
+                    responsive_ips) resp="$v" ;; services) svc="$v" ;;
+                    api_endpoints) api="$v" ;; cert_hosts) certs="$v" ;; cve_hints) cves="$v" ;;
+                esac
+            done < "${d}.stats"
+            printf '<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n' \
+                "$(printf '%s' "$cidr" | _html_escape)" "$status" "$resp" "$svc" "$api" "$certs" "$cves"
+        done
+        echo '</table></div>'
+
+        # Services summary
+        echo '<h2>Interesting Services</h2><div class="wrap"><table><tr><th>Service</th><th>Hosts:Ports</th></tr>'
+        for SERVICE in $SERVICE_LIST; do
+            f="./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+            local c=0; [ -s "$f" ] && c=$(wc -l < "$f")
+            [ "$c" -gt 0 ] && printf '<tr><td>%s</td><td>%s</td></tr>\n' "$SERVICE" "$c"
+        done
+        echo '</table></div>'
+
+        # API endpoints
+        echo '<h2>API Endpoints</h2>'
+        if [ -s "./results/all_interesting_servers/all_api_servers.txt" ]; then
+            echo '<div class="wrap"><table><tr><th>Endpoint</th></tr>'
+            _html_escape < "./results/all_interesting_servers/all_api_servers.txt" | awk '{print "<tr><td><code>"$0"</code></td></tr>"}'
+            echo '</table></div>'
+        else
+            echo '<p class="empty">None discovered (or -a not used).</p>'
+        fi
+
+        # Resolved domains
+        echo '<h2>Resolved Domains</h2>'
+        if [ "$(wc -l < ./results/all_root_domains.csv 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo '<div class="wrap"><table><tr><th>Root Domain</th><th>IP</th><th>CIDR</th><th>AS#</th><th>Owner</th></tr>'
+            tail -n +2 ./results/all_root_domains.csv | sort -u | _html_escape | awk -F, '{printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",$1,$2,$3,$4,$5}'
+            echo '</table></div>'
+        else
+            echo '<p class="empty">None resolved.</p>'
+        fi
+
+        # Cert SANs
+        echo '<h2>TLS Certificate SAN Hosts</h2>'
+        if [ -s "./results/all_cert_sans.txt" ]; then
+            echo '<details><summary>'"$(wc -l < ./results/all_cert_sans.txt | tr -d ' ')"' hostname(s)</summary><div class="wrap"><table>'
+            _html_escape < "./results/all_cert_sans.txt" | awk '{print "<tr><td><code>"$0"</code></td></tr>"}'
+            echo '</table></div></details>'
+        else
+            echo '<p class="empty">None harvested.</p>'
+        fi
+
+        # Dead networks
+        echo '<h2>Unresponsive Ranges</h2>'
+        if [ -s "./results/dead_networks.txt" ]; then
+            echo '<div class="wrap"><table>'
+            _html_escape < "./results/dead_networks.txt" | awk '{print "<tr><td><code>"$0"</code></td></tr>"}'
+            echo '</table></div>'
+        else
+            echo '<p class="empty">None.</p>'
+        fi
+
+        echo '</body></html>'
+    } > "$report"
+
+    echo "Report written: $report"
+    echo "Findings CSV : $csv"
+    return 0
+}
+
+# ===== ORCHESTRATE SCANNING ACROSS ALL CIDR RANGES =====
+NMAP_MAX_PARALLEL="${NMAP_MAX_PARALLEL:-4}"
+DNS_MAX_PARALLEL="${DNS_MAX_PARALLEL:-8}"
+CIDR_MAX_PARALLEL="${CIDR_MAX_PARALLEL:-1}"
+[ "$CIDR_MAX_PARALLEL" -lt 1 ] && CIDR_MAX_PARALLEL=1
+
+# Read masscan's configured rate and split it across concurrent CIDR workers so
+# total packet rate never exceeds the configured budget.
+MASSCAN_RATE=$(awk -F= '/^[[:space:]]*rate[[:space:]]*=/{gsub(/[^0-9.]/,"",$2); print int($2); exit}' scancannon.conf)
+[ -z "$MASSCAN_RATE" ] && MASSCAN_RATE=5000
+MASSCAN_RATE_SHARE=$(( MASSCAN_RATE / CIDR_MAX_PARALLEL ))
+[ "$MASSCAN_RATE_SHARE" -lt 100 ] && MASSCAN_RATE_SHARE=100
+
+cidr_total=${#CIDR_RANGES[@]}
+if [ "$CIDR_MAX_PARALLEL" -le 1 ]; then
+    idx=0
+    for CIDR in "${CIDR_RANGES[@]}"; do
+        track_phase_progress "Scanning CIDR $((idx + 1))/$cidr_total" "$CIDR"
+        scan_cidr "$CIDR" "$idx"
+        idx=$((idx + 1))
+    done
+else
+    echo ""
+    echo "Scanning up to $CIDR_MAX_PARALLEL CIDR(s) concurrently (masscan rate/worker: ${MASSCAN_RATE_SHARE} pps; total budget ${MASSCAN_RATE} pps)."
+    track_phase_progress "Scanning $cidr_total CIDR(s), $CIDR_MAX_PARALLEL at a time"
+    cidr_active=0; idx=0
+    for CIDR in "${CIDR_RANGES[@]}"; do
+        scan_cidr "$CIDR" "$idx" &
+        idx=$((idx + 1)); cidr_active=$((cidr_active + 1))
+        if [ "$cidr_active" -ge "$CIDR_MAX_PARALLEL" ]; then
+            wait -n 2>/dev/null || wait
+            cidr_active=$((cidr_active - 1))
+        fi
+    done
+    wait
+    echo "All CIDR workers finished."
 fi
-done
 
 track_phase_progress "Finalizing results"
 
@@ -1964,19 +2294,26 @@ mv /etc/pf.bak /etc/pf.conf
 pfctl -q -f /etc/pf.conf
 fi
 
-#Report unresponsive networks:
-# Improved unresponsive networks detection
+#Report unresponsive networks (read the exact CIDR from each range's .stats).
 echo "Identifying unresponsive networks..."
-find ./results -maxdepth 1 -type d -name "*_*" | while read -r dir; do
-    dirname=$(basename "$dir")
-    # Skip special directories like interesting_servers, all_interesting_servers, etc.
-    if [[ "$dirname" == *"interesting"* ]] || [[ "$dirname" == "all_"* ]]; then
-        continue
-    fi
-    if [ ! -f "$dir/hosts_and_ports.txt" ]; then
-        echo "$dirname" | sed 's/_/\//g' >> "./results/dead_networks.txt"
+: > "./results/dead_networks.txt"
+for d in ./results/*/; do
+    base=$(basename "$d")
+    case "$base" in all_interesting_servers|*interesting*) continue ;; esac
+    [ -f "${d}.stats" ] || continue
+    if grep -q '^status=dead$' "${d}.stats"; then
+        grep '^cidr=' "${d}.stats" | sed 's/^cidr=//' >> "./results/dead_networks.txt"
     fi
 done
+true  # keep exit status clean for 'set -e' (loop may end on a false grep -q)
+
+# Roll per-CIDR outputs up into global files + summary totals.
+track_phase_progress "Aggregating results"
+aggregate_results
+
+# Build the consolidated HTML + CSV report.
+track_phase_progress "Generating report"
+generate_report
 
 # Final progress update
 printf "\r%s [%s] %3d%% %s\n" "✓" "████████████████████████████████████████" "100" "Scan completed successfully!"
@@ -1986,13 +2323,24 @@ echo -e "\nScan Summary:"
 echo "Total IPs Scanned: $TOTAL_IPS"
 echo "Responsive IPs: $RESPONSIVE_IPS"
 echo "Discovered Services: $DISCOVERED_SERVICES"
+echo "TLS Cert SAN Hosts: $DISCOVERED_CERT_HOSTS"
 if [ "$API_SCAN" -eq 1 ]; then
     echo "API Endpoints Discovered: $DISCOVERED_API_ENDPOINTS"
 fi
+if [ "$CVE_SCAN" -eq 1 ]; then
+    echo "CVE Hints (vulners): $DISCOVERED_CVE_HINTS"
+fi
+echo ""
+echo "Report: ./results/report.html   CSV: ./results/findings.csv"
 echo ""
 echo "Features used:"
 echo "  UDP Scanning: $([ "$UDP_SCAN" -eq 1 ] && echo 'Enabled' || echo 'Disabled')"
 echo "  API Detection: $([ "$API_SCAN" -eq 1 ] && echo 'Enabled' || echo 'Disabled')"
+echo "  CVE Hinting: $([ "$CVE_SCAN" -eq 1 ] && echo 'Enabled' || echo 'Disabled')"
+echo "  CIDR Concurrency: $CIDR_MAX_PARALLEL"
+
+# Notify (if -n was given) with a one-line summary.
+send_notification "completed" "Responsive IPs: ${RESPONSIVE_IPS}, services: ${DISCOVERED_SERVICES}, API: ${DISCOVERED_API_ENDPOINTS}, cert hosts: ${DISCOVERED_CERT_HOSTS}."
 
 echo -e "\n【 Powering down ScanCannon. Please check for any personal belongings before exiting the shell 】"
 

@@ -6,4 +6,5 @@ results/
 scancannon.log
 scancannon.conf.tmp
 scancannon.conf.bak
-scancannon.log
+scancannon_progress.tmp
+.scancannon_cache/
