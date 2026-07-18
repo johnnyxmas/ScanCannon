@@ -1344,12 +1344,12 @@ if [ "$DOWNLOAD_TLD" = true ]; then
     else
         # Process the downloaded file
         # Handle macOS BSD sed vs GNU sed differences
+        # Drop the IANA header comment line (first line). TLDs are stored as
+        # bare labels; the domain-matching awk keys its hash on these directly.
         if [ "$MACOS" -eq 1 ]; then
             sed -i '' '1d' "$TLD_FILE"
-            sed -i '' 's/^/[.]/g' "$TLD_FILE"
         else
             sed -i '1d' "$TLD_FILE"
-            sed -i 's/^/[.]/g' "$TLD_FILE"
         fi
         echo "TLD file updated and processed successfully."
     fi
@@ -1587,10 +1587,12 @@ function detect_api_endpoints() {
                 -w "\n__STATUS__%{http_code}|%{content_type}" \
                 "${proto}://${ip}:${port}/" 2>/dev/null || echo "__STATUS__000|")
 
-            local root_status
-            root_status=$(echo "$root_response" | grep '__STATUS__' | sed 's/__STATUS__//' | cut -d'|' -f1)
-            local root_ctype
-            root_ctype=$(echo "$root_response" | grep '__STATUS__' | sed 's/__STATUS__//' | cut -d'|' -f2)
+            # The status/content-type ride in the last "__STATUS__code|ctype"
+            # marker; split it with parameter expansion (no grep|sed|cut forks).
+            local root_marker root_status root_ctype
+            root_marker="${root_response##*__STATUS__}"
+            root_status="${root_marker%%|*}"
+            root_ctype="${root_marker#*|}"
 
             if [ "$root_status" = "000" ]; then
                 consecutive_failures=$((consecutive_failures + 1))
@@ -1601,8 +1603,9 @@ function detect_api_endpoints() {
                     echo "[Tier 2] API headers on root: ${ip}:${port}" >> "$details_file"
                     echo "${ip}:${port}" >> "$servers_file"
                 fi
-                # Check if root returns JSON
-                if echo "$root_ctype" | grep -qiE 'json'; then
+                # Check if root returns JSON (case-insensitive, no subprocess).
+                # Character classes keep this Bash 3.2-safe (no ${var,,}).
+                if [[ "$root_ctype" == *[Jj][Ss][Oo][Nn]* ]]; then
                     echo "[Tier 2] ${ip}:${port}/ [${root_status}] ${root_ctype}" >> "$details_file"
                     echo "${ip}:${port}/" >> "$servers_file"
                 fi
@@ -1723,11 +1726,11 @@ awk '/open/ {print $4,$3,$2,$1}' "./results/${DIRNAME}/masscan_output.txt" | awk
         }
     }' | sed 's/,$//' >>"./results/${DIRNAME}/hosts_and_ports.txt"
 
-#Update responsive IPs count
-RESPONSIVE_IPS=$((RESPONSIVE_IPS + $(awk '{print $1}' "./results/${DIRNAME}/hosts_and_ports.txt" | sort -u | wc -l)))
-
-# Initialize progress bar
+# The consolidation step above emits exactly one line per unique responsive
+# IP, so the line count is both the host total and the responsive-IP count —
+# no extra awk|sort|wc pass needed.
 TOTAL_HOSTS=$(wc -l < "./results/${DIRNAME}/hosts_and_ports.txt")
+RESPONSIVE_IPS=$((RESPONSIVE_IPS + TOTAL_HOSTS))
 CURRENT_HOST=0
 
 #Run in-depth nmap enumeration against discovered hosts & ports, and output to all formats
@@ -1744,23 +1747,45 @@ if [ "$API_SCAN" -eq 1 ]; then
     NSE_SCRIPT_ARGS="--script=http-headers,http-title,http-robots.txt,http-server-header"
 fi
 
-while read -r TARGET; do
-    IP="$(echo "$TARGET" | awk -F: '{print $1}')"
-    PORT="$(echo "$TARGET" | awk -F: '{print $2}')"
-    FILENAME="$(echo "$IP" | awk '{print "nmap_"$1}')"
-    echo -e "\nBeginning in-depth TCP scan of $IP on port(s) $PORT:\n"
+# Run one nmap per host. These are independent, so scan several hosts
+# concurrently (bounded) instead of strictly serially — the dominant cost
+# of a run is here. Tune with NMAP_MAX_PARALLEL (default 4).
+NMAP_MAX_PARALLEL="${NMAP_MAX_PARALLEL:-4}"
 
-    if [ -n "$NSE_SCRIPT_ARGS" ] && echo "$PORT" | grep -qE '(^|,)(80|443|8080|8443|8000|8888|3000|5000|9090)(,|$)'; then
-        nmap -v --open -sV --version-light -sT -O -Pn -T3 "$NSE_SCRIPT_ARGS" -p "$PORT" -oA "./results/${DIRNAME}/${FILENAME}_tcp" "$IP"
+_scan_host() {
+    local target="$1"
+    # Split "IP:PORT" with parameter expansion — no subprocess needed.
+    local ip="${target%%:*}"
+    local port="${target#*:}"
+    local filename="nmap_${ip}"
+    echo -e "\nBeginning in-depth TCP scan of $ip on port(s) $port:\n"
+
+    # Add NSE http scripts only when an HTTP-ish port is present (bash regex,
+    # no echo|grep subprocess).
+    if [ -n "$NSE_SCRIPT_ARGS" ] && [[ ",$port," =~ ,(80|443|8080|8443|8000|8888|3000|5000|9090), ]]; then
+        nmap -v --open -sV --version-light -sT -O -Pn -T3 "$NSE_SCRIPT_ARGS" -p "$port" -oA "./results/${DIRNAME}/${filename}_tcp" "$ip"
     else
-        nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$PORT" -oA "./results/${DIRNAME}/${FILENAME}_tcp" "$IP"
+        nmap -v --open -sV --version-light -sT -O -Pn -T3 -p "$port" -oA "./results/${DIRNAME}/${filename}_tcp" "$ip"
     fi
+}
 
-    # Update progress bar
-    CURRENT_HOST=$((CURRENT_HOST + 1))
-    PROGRESS=$((CURRENT_HOST * 100 / TOTAL_HOSTS))
-    echo -ne "\rProgress: [$PROGRESS%] [$CURRENT_HOST/$TOTAL_HOSTS] hosts scanned..."
+active_jobs=0
+while read -r TARGET; do
+    [ -z "$TARGET" ] && continue
+    _scan_host "$TARGET" &
+    active_jobs=$((active_jobs + 1))
+
+    if [ "$active_jobs" -ge "$NMAP_MAX_PARALLEL" ]; then
+        wait -n 2>/dev/null || wait
+        active_jobs=$((active_jobs - 1))
+        CURRENT_HOST=$((CURRENT_HOST + 1))
+        PROGRESS=$((CURRENT_HOST * 100 / TOTAL_HOSTS))
+        echo -ne "\rProgress: [$PROGRESS%] [$CURRENT_HOST/$TOTAL_HOSTS] hosts scanned..."
+    fi
 done <"./results/${DIRNAME}/hosts_and_ports.txt"
+
+# Drain any remaining background scans.
+wait
 echo -ne "\rProgress: [100%] [$TOTAL_HOSTS/$TOTAL_HOSTS] hosts scanned...Done.\n"
 
 track_phase_progress "Service analysis" "$CIDR"
@@ -1769,29 +1794,47 @@ mkdir -p "./results/${DIRNAME}/interesting_servers/"
 mkdir -p "./results/all_interesting_servers/"
 #(if you add to this service list, make sure you also add it to the master file generation list at the end.)
 # Check if gnmap files exist before processing all services
+SERVICE_LIST="domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https"
 if ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-    # Process all services in a single pass through gnmap files for efficiency
-    for SERVICE in domain msrpc snmp netbios-ssn microsoft-ds isakmp l2f pptp ftp sftp ssh telnet http ssl https; do
-        # Optimized service detection with single awk call
-        awk -v service="$SERVICE" '
-            /open/ && $0 ~ service {
-                ip = $2
-                # Extract port from the ports section
-                for (i = 3; i <= NF; i++) {
-                    if ($i ~ "[0-9]+/open/[^/]*/[^/]*" service) {
-                        split($i, port_parts, "/")
-                        if (port_parts[1] && ip) {
-                            print ip ":" port_parts[1]
-                        }
+    INTERESTING_DIR="./results/${DIRNAME}/interesting_servers"
+    # Classify every service in a SINGLE pass over the gnmap files (previously
+    # this scanned the files once per service). Each match is written straight
+    # to that service's output file from within awk.
+    awk -v services="$SERVICE_LIST" -v outdir="$INTERESTING_DIR" '
+        BEGIN { n = split(services, svc, " ") }
+        /open/ {
+            ip = $2
+            if (ip == "") { next }
+            # Each port token is "port/state/proto/owner/service/rpc/version".
+            # nmap leaves owner empty ("//"), so the service name lives in
+            # field 5. Split once per token and match on that field directly,
+            # instead of a brittle whole-token regex that never fired against
+            # real nmap output.
+            for (i = 3; i <= NF; i++) {
+                m = split($i, port_parts, "/")
+                if (m < 5) { continue }
+                if (port_parts[2] != "open") { continue }
+                if (port_parts[1] !~ /^[0-9]+$/) { continue }
+                svc_field = port_parts[5]
+                if (svc_field == "") { continue }
+                for (s = 1; s <= n; s++) {
+                    if (index(svc_field, svc[s]) > 0) {
+                        fname = outdir "/" svc[s] "_servers.txt"
+                        print ip ":" port_parts[1] > fname
                     }
                 }
             }
-        ' "./results/${DIRNAME}"/*.gnmap > "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt"
-        
-        # Only append to global file if local file has content
-        if [ -s "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" ]; then
-            cat "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt" >> "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
-            DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + $(wc -l < "./results/${DIRNAME}/interesting_servers/${SERVICE}_servers.txt")))
+        }
+    ' "./results/${DIRNAME}"/*.gnmap
+
+    # Append to global files and tally counts (cheap per-service, no rescans).
+    for SERVICE in $SERVICE_LIST; do
+        service_file="${INTERESTING_DIR}/${SERVICE}_servers.txt"
+        # Preserve prior behavior of always having a (possibly empty) file.
+        [ -f "$service_file" ] || : > "$service_file"
+        if [ -s "$service_file" ]; then
+            cat "$service_file" >> "./results/all_interesting_servers/all_${SERVICE}_servers.txt"
+            DISCOVERED_SERVICES=$((DISCOVERED_SERVICES + $(wc -l < "$service_file")))
         fi
     done
 fi
@@ -1809,25 +1852,29 @@ echo "Root Domain,IP,CIDR,AS#,IP Owner" >> "./results/all_root_domains.csv"
 
 # Check if TLD file exists and has content, and if gnmap files exist
 if [ -s "./all_tlds.txt" ] && ls "./results/${DIRNAME}"/*.gnmap >/dev/null 2>&1; then
-    # Optimized domain extraction with single awk pass
+    # Optimized domain extraction with single awk pass.
+    # Build a hash of valid TLDs keyed by the bare label, then do an O(1)
+    # lookup on each domain's final label instead of scanning every TLD.
     awk -F'[()]' '
         BEGIN {
-            # Read TLD patterns
+            # Read TLD list. Normalize by stripping any leading non-alnum
+            # decoration (e.g. the legacy "[.]" prefix) so both old and new
+            # TLD files work.
             while ((getline tld < "./all_tlds.txt") > 0) {
-                if (tld !~ /^#/ && tld != "") {
-                    tlds[tolower(tld)] = 1
-                }
+                if (tld ~ /^#/ || tld == "") { continue }
+                tld = tolower(tld)
+                gsub(/^[^a-z0-9]+/, "", tld)   # drop leading "[.]" etc.
+                if (tld != "") { tlds[tld] = 1 }
             }
             close("./all_tlds.txt")
         }
         {
             if ($2) {
                 domain = tolower($2)
-                for (tld in tlds) {
-                    if (domain ~ tld) {
-                        domains[domain] = 1
-                        break
-                    }
+                # Anchor on the real final label; O(1) hash lookup.
+                n = split(domain, labels, ".")
+                if (n >= 2 && (labels[n] in tlds)) {
+                    domains[domain] = 1
                 }
             }
         }
@@ -1848,27 +1895,54 @@ fi
 if [ -s "./results/${DIRNAME}/resolved_subdomains.txt" ]; then
     # Create temporary file for batch processing
     temp_domains=$(mktemp)
-    
-    # Extract root domains and process in batch
-    awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt" | sort -u | while read -r DOMAIN; do
-        DIG="$(dig "$DOMAIN" +short)"
-        if [ -n "$DIG" ]; then
-            # More robust whois parsing
-            WHOIS="$(whois "$DIG" | awk -F':[ ]*' '
-                    /CIDR:/ { cidr = $2 };
-                    /Organization:/ { org = $2 };
-                    /OriginAS:/ { asn = $2 }
-                    END {
-                        if (cidr != "" || asn != "" || org != "") {
-                            printf "%s,%s,%s", cidr, asn, org
-                        } else {
-                            print "N/A,N/A,N/A"
-                        }
-                    }')"
-            echo "$DOMAIN,$DIG,$WHOIS" >> "$temp_domains"
+    # Each domain's dig+whois are independent network round-trips (and whois
+    # is often slow/rate-limited), so resolve several concurrently. Each job
+    # writes to its own file to avoid interleaved/corrupted lines; results are
+    # concatenated afterward. Tune with DNS_MAX_PARALLEL (default 8).
+    resolve_dir=$(mktemp -d)
+    DNS_MAX_PARALLEL="${DNS_MAX_PARALLEL:-8}"
+
+    _resolve_root_domain() {
+        local domain="$1"
+        local outfile="$2"
+        local dig
+        dig="$(dig "$domain" +short)"
+        [ -z "$dig" ] && return 0
+        # More robust whois parsing
+        local whois_csv
+        whois_csv="$(whois "$dig" | awk -F':[ ]*' '
+                /CIDR:/ { cidr = $2 };
+                /Organization:/ { org = $2 };
+                /OriginAS:/ { asn = $2 }
+                END {
+                    if (cidr != "" || asn != "" || org != "") {
+                        printf "%s,%s,%s", cidr, asn, org
+                    } else {
+                        print "N/A,N/A,N/A"
+                    }
+                }')"
+        printf '%s,%s,%s\n' "$domain" "$dig" "$whois_csv" > "$outfile"
+    }
+
+    # Extract unique root domains and resolve them in parallel.
+    active_jobs=0
+    domain_idx=0
+    while IFS= read -r DOMAIN; do
+        [ -z "$DOMAIN" ] && continue
+        domain_idx=$((domain_idx + 1))
+        _resolve_root_domain "$DOMAIN" "${resolve_dir}/${domain_idx}" &
+        active_jobs=$((active_jobs + 1))
+        if [ "$active_jobs" -ge "$DNS_MAX_PARALLEL" ]; then
+            wait -n 2>/dev/null || wait
+            active_jobs=$((active_jobs - 1))
         fi
-    done
-    
+    done < <(awk -F. '{ print $(NF-1)"."$NF }' "./results/${DIRNAME}/resolved_subdomains.txt" | sort -u)
+    wait
+
+    # Gather per-job results in a stable order.
+    cat "${resolve_dir}"/* 2>/dev/null >> "$temp_domains"
+    rm -rf "$resolve_dir"
+
     # Append batch results to both files
     if [ -s "$temp_domains" ]; then
         cat "$temp_domains" >> "./results/${DIRNAME}/resolved_root_domains.csv"
