@@ -3,6 +3,17 @@
 All notable changes to ScanCannon are documented here. Versions follow the
 in-script banner (`scancannon.sh`).
 
+## v1.9
+
+### Fixed
+- Registrable-domain extraction now uses the **Public Suffix List** (fetched on
+  demand for `-d` runs, cached ~30 days), correctly handling multi-label ccTLDs,
+  wildcard, and exception rules. Falls back to the built-in ccTLD table offline.
+
+### Changed
+- README refreshed to match current capabilities (projects, scan-diff, resume,
+  cert-SAN harvesting, CVE hinting, notifications, report output).
+
 ## v1.8
 
 ### Added

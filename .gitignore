@@ -9,3 +9,4 @@ scancannon.conf.tmp
 scancannon.conf.bak
 scancannon_progress.tmp
 .scancannon_cache/
+public_suffix_list.dat

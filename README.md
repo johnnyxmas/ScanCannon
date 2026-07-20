@@ -1,10 +1,10 @@
-# ScanCannon v1.8
+# ScanCannon v1.9
 
 ![scancannon](https://i.imgur.com/jebggX7.png)
 
 **A Bash script for efficient credentials-based attack surface enumeration and general reconnaissance of massive external network ranges.**
 
-ScanCannon handles the enumeration of extremely large networks (such as The Internet) at high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces and APIs. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Final artifact is an array of flat text files full of IPs, hostnames, and interesting services that you can easily load up into the next tool in your killchain. 
+ScanCannon handles the enumeration of extremely large networks (such as The Internet) at high of speeds as the infrastructure can handle, specifically looking for credentials-based attack surfaces and APIs. It uses `masscan` to quickly identify open ports, then calls `nmap` to gain detailed information on the systems and services listening on those ports, thus compensating for the lack of acureacy in `masscan.` Output is a consolidated HTML/CSV report plus flat text files of IPs, hostnames, and interesting services, ready to load into the next tool in your killchain. Runs are organized into projects, and each scan reports what changed since the last one.
 
 ## Table of Contents
 
@@ -26,16 +26,16 @@ ScanCannon handles the enumeration of extremely large networks (such as The Inte
 
 ### Features
 
-- **High-speed network enumeration** using masscan for initial discovery
-- **Detailed service detection** using nmap for discovered hosts
-- **API endpoint detection** using nmap NSE scripts and targeted curl probing (with `-a` flag)
-- **Full ASN-based network discovery** — resolves all A records, queries `whois` for CIDR + ASN, then discovers ALL prefixes announced by the ASN via RADB. Works for both `-d` (domain) and `-c` (CIDR) inputs with interactive range selection.
-- **Comprehensive output formats** including flat files for easy import into other tools
-- **Automatic domain/subdomain discovery** from scan results
-- **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.)
-- **Advanced progress tracking** with real-time visual feedback, ETA calculations, and phase monitoring
-- **Automatic cleanup** and file organization
-- **Cross-platform support** (Linux, MacOS, WSL2)
+- **High-speed enumeration** — masscan finds open ports, nmap deep-scans only the responsive hosts
+- **Full ASN-based discovery** — resolves A records, queries `whois` for CIDR + ASN, then pulls every prefix the ASN announces via RADB, with interactive range selection (`-d` and `-c`)
+- **Projects & scan-diff** — results are grouped per project and each run reports what changed (new/gone services) versus the previous scan, turning repeat scans into attack-surface monitoring
+- **Resume** — completed CIDRs are checkpointed and skipped on re-run; masscan state is preserved on interrupt
+- **API detection** (`-a`) — nmap NSE + targeted `curl` probing, plus TLS-certificate SAN harvesting that feeds new hostnames back into discovery
+- **CVE hinting** (`-V`) — nmap `vulners` NSE against detected service versions
+- **Consolidated report** — a self-contained `report.html` and flat `findings.csv` per run, alongside the raw per-service text files
+- **Service categorization** for common credential attack vectors (SSH, FTP, HTTP, SMB, etc.) and automatic domain/subdomain discovery
+- **Fast & resilient** — parallel per-host/per-CIDR scanning, whois caching with retry/backoff, completion notifications (`-n`)
+- **Cross-platform** (Linux, macOS, WSL2), Bash 3.2-compatible
 
 ### Target Services
 
@@ -71,7 +71,7 @@ ScanCannon focuses on these high-value services for security assessment:
 - **[Masscan v1.0.3+](https://github.com/robertdavidgraham/masscan)** - High-speed port scanner
 - **[Nmap v7.0.1+](https://github.com/nmap/nmap)** - Network discovery and security auditing
 - **Standard Unix tools**: `dig`, `whois`, `wget`, `awk`, `sed`
-- **curl** *(optional, required for API endpoint detection with `-a` flag)*
+- **curl** *(optional, required for API detection `-a` and webhook notifications `-n`)*
 
 
 ## Quick Start
@@ -232,34 +232,25 @@ arp -a | grep $(netstat -rn | grep default | awk '{print $2}')  # Gateway MAC
 
 ## Understanding Output
 
-ScanCannon creates organized output in the `results/` directory:
+Each run's output lives under its project (`./projects/<name>/`):
 
 ```
-results/
-├── 203_0_113_0_24/                    # Per-network results
-│   ├── masscan_output.bin             # Binary masscan results
-│   ├── masscan_output.txt             # Text masscan results
-│   ├── hosts_and_ports.txt            # Discovered hosts:ports
-│   ├── nmap_files/                    # Individual nmap scans
-│   ├── gnmap_files/                   # Greppable nmap output
-│   ├── nmap_xml_files/                # XML nmap output
-│   ├── interesting_servers/           # Categorized services
-│   │   ├── ssh_servers.txt            # SSH servers found
-│   │   ├── http_servers.txt           # Web servers found
-│   │   ├── ftp_servers.txt            # FTP servers found
-│   │   ├── api_servers.txt            # API endpoints found (with -a)
-│   │   ├── api_details.txt            # API detection details (with -a)
-│   │   └── ...                        # Other services
-│   ├── resolved_subdomains.txt        # Discovered domains
-│   └── resolved_root_domains.csv      # Domain details with WHOIS
-├── all_interesting_servers/           # Combined results
-│   ├── all_ssh_servers.txt            # All SSH servers
-│   ├── all_http_servers.txt           # All web servers
-│   ├── all_api_servers.txt            # All API endpoints (with -a)
-│   └── ...                            # Other combined lists
-├── all_subdomains.txt                 # All discovered domains
-├── all_root_domains.csv               # All domain details
-└── dead_networks.txt                  # Unresponsive networks
+projects/<name>/
+├── results/
+│   ├── report.html                    # Consolidated, browsable report
+│   ├── findings.csv                    # Flat service,ip,port list
+│   ├── 203_0_113_0_24/                 # Per-network results
+│   │   ├── masscan_output.bin/.txt     # Raw masscan output
+│   │   ├── hosts_and_ports.txt         # Discovered hosts:ports
+│   │   ├── nmap_files/ gnmap_files/ nmap_xml_files/
+│   │   ├── interesting_servers/        # Categorized services (ssh_, http_,
+│   │   │                               #   api_servers.txt, cert_sans.txt, ...)
+│   │   ├── resolved_subdomains.txt
+│   │   └── resolved_root_domains.csv   # Domain details with WHOIS
+│   ├── all_interesting_servers/        # Combined per-service lists
+│   ├── all_subdomains.txt  all_cert_sans.txt  all_root_domains.csv
+│   └── dead_networks.txt               # Unresponsive networks
+└── history/                            # Timestamped snapshots (drives scan-diff)
 ```
 
 ## Safety & Legal Considerations
@@ -343,7 +334,7 @@ Both masscan and nmap require raw socket access for SYN scanning and OS detectio
 
 ### Can I pause and resume scans?
 
-Currently, ScanCannon doesn't support pause/resume functionality. For large scans, consider breaking them into smaller CIDR ranges.
+Yes. Each CIDR is checkpointed on completion, so re-running the same project and choosing **Merge** skips ranges already finished. If you interrupt a scan (Ctrl-C), masscan's state is saved to `paused.conf` for a manual `masscan --resume`.
 
 ### How do I scan IPv6 networks?
 
@@ -351,7 +342,8 @@ ScanCannon currently focuses on IPv4 networks. For IPv6 scanning, use nmap direc
 
 ## Known Issues
 
-- **International TLD Detection**: Domain detection for international TLDs (like .co.uk, .io, etc.) may not work reliably due to varying WHOIS output standards (TODO?)
+- **Offline domain extraction**: `-d` runs use the Public Suffix List (fetched automatically, cached ~30 days) for accurate registrable-domain extraction. If it can't be downloaded, ScanCannon falls back to a built-in common-ccTLD table, which may occasionally mis-split an uncommon suffix.
+- **IPv4 only**: IPv6 targets are not scanned.
 
 ## License
 
@@ -371,6 +363,6 @@ For the full license text, see [LICENSE](LICENSE).
 
 ---
 
-**ScanCannon v1.8 by J0hnnyXm4s**
+**ScanCannon v1.9 by J0hnnyXm4s**
 
 *"Efficient credential attack surface enumeration and general reconnaissance of massive network ranges"*

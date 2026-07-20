@@ -20,6 +20,10 @@ PROJECT_SLUG=""
 PROJECT_DIR=""
 RESULTS_DIR="./results"
 
+# Public Suffix List (downloaded on demand for -d runs) for accurate
+# registrable-domain extraction; falls back to a built-in table when absent.
+PSL_FILE="./public_suffix_list.dat"
+
 # Scan-diff state (populated by _sc_compute_changes, rendered by generate_report).
 DELTA_ADDED=0
 DELTA_REMOVED=0
@@ -36,7 +40,7 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.8 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.9 by J0hnnyXm4s ¤]×)¤••\n"
 }
 
 # ===== PROGRESS TRACKING SYSTEM =====
@@ -283,10 +287,65 @@ read_cidr_file() {
     return 0
 }
 
+# Download/refresh the Public Suffix List (>30 days old or missing). Best-effort:
+# on failure extract_domain falls back to the built-in MULTI_LABEL_SUFFIXES table.
+ensure_psl() {
+    local max_age=$((30 * 86400)) need=1
+    if [ -s "$PSL_FILE" ]; then
+        local mtime now
+        now=$(date +%s)
+        if [ "${MACOS:-0}" -eq 1 ]; then
+            mtime=$(stat -f %m "$PSL_FILE" 2>/dev/null || echo 0)
+        else
+            mtime=$(stat -c %Y "$PSL_FILE" 2>/dev/null || echo 0)
+        fi
+        [ $((now - mtime)) -lt "$max_age" ] && need=0
+    fi
+    [ "$need" -eq 0 ] && return 0
+    echo "Fetching Public Suffix List for accurate domain extraction..."
+    if wget -q https://publicsuffix.org/list/public_suffix_list.dat -O "${PSL_FILE}.tmp" 2>/dev/null; then
+        mv "${PSL_FILE}.tmp" "$PSL_FILE"
+    else
+        rm -f "${PSL_FILE}.tmp"
+        echo "  WARNING: could not fetch PSL; using the built-in ccTLD table."
+    fi
+    return 0
+}
+
+# Reduce a hostname to its registrable domain using Public Suffix List rules
+# (handles wildcard '*' and exception '!' rules). Reads $PSL_FILE.
+public_suffix_domain() {
+    awk -v host="$1" -v pslfile="$PSL_FILE" '
+    function join(A, a, b,   s, k) { s=""; for (k=a; k<=b; k++) s = s (k>a?".":"") A[k]; return s }
+    BEGIN {
+        while ((getline line < pslfile) > 0) {
+            gsub(/\r/, "", line)
+            if (line == "" || line ~ /^\/\//) continue
+            sub(/[ \t].*/, "", line)              # first field only
+            if (line == "") continue
+            if (substr(line,1,1) == "!") exc[substr(line,2)] = 1
+            else rule[line] = 1
+        }
+        n = split(host, L, ".")
+        if (n < 2) { print host; exit }
+        found = 0; ps_start = n                    # default rule "*": suffix = last label
+        for (i = 1; i <= n; i++)                    # exception rules take precedence
+            if (join(L,i,n) in exc) { ps_start = i + 1; found = 1; break }
+        if (!found)
+            for (i = 1; i <= n; i++) {              # longest (most-labels) match wins
+                if (join(L,i,n) in rule) { ps_start = i; break }
+                if (i < n && ("*." join(L,i+1,n)) in rule) { ps_start = i; break }
+            }
+        reg_start = ps_start - 1
+        if (reg_start < 1) reg_start = ps_start     # host is itself a public suffix
+        print join(L, reg_start, n)
+    }'
+}
+
 # Known multi-label public suffixes. IANA's TLD list only contains single
 # labels (uk, au, ...), so registrable domains under these (example.co.uk) need
 # an explicit table to avoid collapsing to the suffix itself (co.uk). This is a
-# pragmatic subset of the Public Suffix List covering common ccTLD SLDs.
+# pragmatic subset of the Public Suffix List, used when $PSL_FILE is unavailable.
 MULTI_LABEL_SUFFIXES=(
     co.uk org.uk gov.uk ac.uk me.uk ltd.uk plc.uk net.uk sch.uk
     com.au net.au org.au edu.au gov.au id.au
@@ -315,6 +374,17 @@ function extract_domain() {
     if [ -z "$hostname" ]; then
         echo ""
         return 1
+    fi
+
+    # Prefer the Public Suffix List when present (downloaded during -d setup);
+    # fall back to the built-in table offline and in tests.
+    if [ -s "$PSL_FILE" ]; then
+        local reg
+        reg=$(public_suffix_domain "$hostname")
+        if [ -n "$reg" ]; then
+            echo "$reg"
+            return 0
+        fi
     fi
 
     local nlabels
@@ -1419,6 +1489,7 @@ done
 
 # 1) Process -d (domain) flags — full ASN discovery pipeline
 if [ ${#DOMAIN_ARGS[@]} -gt 0 ]; then
+    ensure_psl   # accurate registrable-domain extraction for -d inputs
     echo ""
     echo "=== Domain Mode: Full Network Discovery ==="
     for domain_input in "${DOMAIN_ARGS[@]}"; do

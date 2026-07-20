@@ -1,0 +1,12 @@
+// Minimal Public Suffix List subset for tests
+com
+net
+org
+uk
+co.uk
+org.uk
+au
+com.au
+// wildcard + exception rules
+*.ck
+!www.ck
