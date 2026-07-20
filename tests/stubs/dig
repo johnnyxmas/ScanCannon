@@ -1,0 +1,3 @@
+#!/bin/bash
+# Test stub for dig. Prints $DIG_RESULT (default a single A record).
+printf '%s\n' "${DIG_RESULT:-203.0.113.5}"

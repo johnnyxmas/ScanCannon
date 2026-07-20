@@ -1,0 +1,28 @@
+#!/bin/bash
+# Test stub for nmap.
+# Parses "-oA <prefix>" and the target IP (last non-flag arg), then writes
+# .gnmap/.nmap/.xml output. If $NMAP_FIXTURES/<ip>.gnmap exists it is used;
+# otherwise a minimal ssh-only host is synthesized.
+prefix=""
+ip=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -oA) prefix="$2"; shift 2 ;;
+        -*) shift ;;
+        *) ip="$1"; shift ;;
+    esac
+done
+[ -z "$prefix" ] && exit 0
+
+if [ -n "${NMAP_FIXTURES:-}" ] && [ -f "${NMAP_FIXTURES}/${ip}.gnmap" ]; then
+    cp "${NMAP_FIXTURES}/${ip}.gnmap" "${prefix}.gnmap"
+    if [ -f "${NMAP_FIXTURES}/${ip}.nmap" ]; then
+        cp "${NMAP_FIXTURES}/${ip}.nmap" "${prefix}.nmap"
+    else
+        : > "${prefix}.nmap"
+    fi
+else
+    printf 'Host: %s (host.example.com)\tPorts: 22/open/tcp//ssh//OpenSSH\tIgnored State: closed\n' "$ip" > "${prefix}.gnmap"
+    : > "${prefix}.nmap"
+fi
+: > "${prefix}.xml"

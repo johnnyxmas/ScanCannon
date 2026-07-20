@@ -1,0 +1,13 @@
+#!/bin/bash
+# Test stub for whois.
+#   WHOIS_CALLLOG : if set, append one line per invocation (call counting)
+#   WHOIS_EMPTY=1 : emit nothing (simulate a rate-limited/empty reply)
+#   WHOIS_OUTPUT  : if set, emit this instead of the default ARIN-style block
+[ -n "${WHOIS_CALLLOG:-}" ] && printf 'call %s\n' "$*" >> "$WHOIS_CALLLOG"
+if [ "${WHOIS_EMPTY:-0}" = "1" ]; then
+    exit 0
+elif [ -n "${WHOIS_OUTPUT:-}" ]; then
+    printf '%s\n' "$WHOIS_OUTPUT"
+else
+    printf 'CIDR: 203.0.113.0/24\nOrganization: Example Inc\nOriginAS: AS64500\n'
+fi

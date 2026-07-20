@@ -1,0 +1,14 @@
+#!/bin/bash
+# Test stub for curl (used by detect_api_endpoints).
+# Default: simulate an unreachable host (HTTP 000) so probing completes with no
+# findings. Set CURL_STATUS / CURL_CTYPE to simulate a live API endpoint.
+status="${CURL_STATUS:-000}"
+ctype="${CURL_CTYPE:-}"
+# The root probe uses: -D - -o /dev/null -w "\n__STATUS__%{http_code}|%{content_type}"
+# The path probes use: -o /dev/null -w "%{http_code}|%{content_type}"
+for a in "$@"; do
+    case "$a" in
+        *__STATUS__*) printf '\n__STATUS__%s|%s' "$status" "$ctype"; exit 0 ;;
+    esac
+done
+printf '%s|%s' "$status" "$ctype"

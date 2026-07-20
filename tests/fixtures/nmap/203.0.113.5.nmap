@@ -1,0 +1,11 @@
+Nmap scan report for host5.example.com (203.0.113.5)
+PORT    STATE SERVICE  VERSION
+22/tcp  open  ssh      OpenSSH 6.6.1p1 Ubuntu
+| vulners:
+|   cpe:/a:openbsd:openssh:6.6.1p1:
+|       CVE-2015-5600   8.5   https://vulners.com/cve/CVE-2015-5600
+|_      CVE-2016-0777   6.4   https://vulners.com/cve/CVE-2016-0777
+443/tcp open  ssl/http nginx 1.18.0
+| ssl-cert: Subject: commonName=example.com
+| Subject Alternative Name: DNS:example.com, DNS:api.example.com, DNS:*.cdn.example.com, DNS:mail.EXAMPLE.com
+|_Not valid after:  2027-01-01

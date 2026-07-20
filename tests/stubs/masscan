@@ -1,0 +1,24 @@
+#!/bin/bash
+# Test stub for masscan.
+#   Scan mode:     -oB <file> <CIDR>   -> writes an (empty) binary placeholder
+#   Readscan mode: --readscan <bin> -oL <file>
+#     Emits one "open" line per entry in $MASSCAN_OPEN ("ip:port ip:port ..."),
+#     or an empty file (a dead range) when MASSCAN_OPEN is unset/empty.
+out=""
+readscan=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --readscan) readscan=1; shift ;;
+        -oB|-oL) out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[ -z "$out" ] && exit 0
+if [ "$readscan" -eq 1 ] && [ -n "${MASSCAN_OPEN:-}" ]; then
+    : > "$out"
+    for hp in $MASSCAN_OPEN; do
+        printf 'open tcp %s %s 1700000000\n' "${hp##*:}" "${hp%%:*}" >> "$out"
+    done
+else
+    : > "$out"
+fi

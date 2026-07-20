@@ -1,4 +1,4 @@
-name: Lint
+name: Lint & Test
 
 on:
   push:
@@ -25,3 +25,19 @@ jobs:
       # inline `# shellcheck disable=` directives rather than "modernized".
       - name: Run shellcheck
         run: shellcheck --severity=warning scancannon.sh
+
+  bats:
+    name: bats test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin bats-core rather than using the distro package, so the runner's
+      # bats version can't silently drift out from under the tests.
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.11.1 https://github.com/bats-core/bats-core.git "$HOME/bats-core"
+          echo "$HOME/bats-core/bin" >> "$GITHUB_PATH"
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure tests/
