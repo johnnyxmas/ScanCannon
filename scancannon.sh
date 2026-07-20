@@ -1,15 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# Detect execution vs. sourcing. The test suite sources this file to load its
-# functions without running the scan; every imperative block below is gated on
-# SC_EXECUTED so sourcing has no side effects (no banner, no scan, no traps).
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then SC_EXECUTED=1; else SC_EXECUTED=0; fi
+# This script is safe to `source`: the top level only defines functions and
+# globals. The imperative flow lives in main(), invoked at the very bottom and
+# only when the file is executed directly (see the BASH_SOURCE guard there).
+# The test suite relies on this to load the real functions without running a scan.
 
 #Logging
 LOG_FILE="scancannon.log"
 
-if [ "$SC_EXECUTED" = 1 ]; then
+_sc_start() {
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo ""
@@ -21,7 +21,7 @@ echo "███████║╚██████╗██║  ██║██
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
 echo -e "••¤(×[¤ ScanCannon v1.7 by J0hnnyXm4s ¤]×)¤••\n"
-fi
+}
 
 # ===== PROGRESS TRACKING SYSTEM =====
 
@@ -119,7 +119,7 @@ cleanup_progress() {
 if [ "$(uname)" = "Darwin" ]; then MACOS=1; else MACOS=0; fi
 
 # Check for updates (only when run directly; skipped when sourced by tests).
-if [ "$SC_EXECUTED" = 1 ]; then
+_sc_check_for_updates() {
     # Use the same branch name for checking and pulling
     REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
     LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
@@ -144,7 +144,7 @@ if [ "$SC_EXECUTED" = 1 ]; then
                 ;;
         esac
     fi
-fi
+}
 
 #Help Text:
 function helptext() {
@@ -928,7 +928,7 @@ function validate_exclude_file() {
     return 0
 }
 
-if [ "$SC_EXECUTED" = 1 ]; then
+_sc_check_dependencies() {
 #Check if required tools are installed
 for tool in masscan nmap dig whois; do
 if ! command -v "$tool" >/dev/null 2>&1; then
@@ -942,7 +942,7 @@ if [ ! -f "scancannon.conf" ]; then
     echo "ERROR: scancannon.conf not found. Please ensure the configuration file exists."
     exit 1
 fi
-fi
+}
 
 # Function to detect network interfaces
 function detect_interfaces() {
@@ -1140,7 +1140,7 @@ function configure_adapter() {
     echo ""
 }
 
-if [ "$SC_EXECUTED" = 1 ]; then
+_sc_parse_args_and_setup() {
 # Always offer network adapter configuration
 configure_adapter
 
@@ -1479,7 +1479,7 @@ else
         echo "Packet filter rule already exists. Skipping addition."
     fi
 fi
-fi  # end SC_EXECUTED setup block (tools/getopts/inputs/filters)
+}  # end _sc_parse_args_and_setup (tools/getopts/inputs/filters)
 
 #Initialize variables for summary
 TOTAL_IPS=0
@@ -1561,7 +1561,7 @@ send_notification "interrupted" "Run was cancelled before completion."
 echo -e "Exiting."
 exit 0
 }
-if [ "$SC_EXECUTED" = 1 ]; then trap ctrl_c INT; fi
+# (the INT trap is installed by main, once the scan begins)
 
 # ===== API ENDPOINT DETECTION FUNCTION =====
 function detect_api_endpoints() {
@@ -2259,7 +2259,7 @@ HTMLHEAD
     return 0
 }
 
-if [ "$SC_EXECUTED" = 1 ]; then
+_sc_run_scan() {
 # ===== ORCHESTRATE SCANNING ACROSS ALL CIDR RANGES =====
 NMAP_MAX_PARALLEL="${NMAP_MAX_PARALLEL:-4}"
 DNS_MAX_PARALLEL="${DNS_MAX_PARALLEL:-8}"
@@ -2361,4 +2361,22 @@ echo -e "\n【 Powering down ScanCannon. Please check for any personal belonging
 
 # Call cleanup function at the end of script
 cleanup
-fi  # end SC_EXECUTED main run
+}  # end _sc_run_scan
+
+# ===== ENTRY POINT =====
+# Orchestrates the whole run. Kept as a single main() so the imperative flow is
+# in one place; each step is a named function defined above.
+main() {
+    _sc_start                        # logging + banner
+    _sc_check_for_updates            # optional self-update prompt
+    _sc_check_dependencies           # required tools + config file
+    _sc_parse_args_and_setup "$@"    # adapter config, getopts, targets, filters
+    trap ctrl_c INT                  # clean up on interrupt once scanning starts
+    _sc_run_scan                     # masscan/nmap orchestration, aggregate, report
+}
+
+# Run only when executed directly; sourcing (e.g. the test suite) just loads
+# the functions and globals above.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi
