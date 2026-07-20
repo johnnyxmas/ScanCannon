@@ -26,6 +26,9 @@ jobs:
       - name: Run shellcheck
         run: shellcheck --severity=warning scancannon.sh
 
+      - name: Shellcheck test harness + stubs
+        run: shellcheck --severity=warning tests/helpers.bash tests/stubs/*
+
   bats:
     name: bats test suite
     runs-on: ubuntu-latest

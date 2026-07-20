@@ -31,3 +31,23 @@ setup() {
     run extract_domain "http://example.org:8080/x"
     [ "$output" = "example.org" ]
 }
+
+@test "extract_domain keeps the registrable domain for a two-label ccTLD" {
+    run extract_domain "mail.example.co.uk"
+    [ "$output" = "example.co.uk" ]
+}
+
+@test "extract_domain handles deep subdomains under com.au" {
+    run extract_domain "https://a.b.example.com.au/path"
+    [ "$output" = "example.com.au" ]
+}
+
+@test "extract_domain does not over-trim a plain .com" {
+    run extract_domain "deep.sub.example.com"
+    [ "$output" = "example.com" ]
+}
+
+@test "extract_domain lowercases the result" {
+    run extract_domain "MAIL.Example.COM"
+    [ "$output" = "example.com" ]
+}

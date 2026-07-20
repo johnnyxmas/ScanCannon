@@ -1,4 +1,4 @@
-# ScanCannon v1.7
+# ScanCannon v1.8
 
 ![scancannon](https://i.imgur.com/jebggX7.png)
 
@@ -90,9 +90,18 @@ At least one `-d`, `-c`, or `-f` flag is **required**. All three flags are repea
 - `-f file` : Read CIDR ranges from a file (one per line, blank lines and `#` comments ignored; repeatable). Entries are scanned **as-is** — ASN discovery is skipped by default so curated lists don't get expanded into parent prefixes or trigger an interactive prompt per line.
 - `-F` : Force ASN-based network discovery on `-f` file entries (treats each line like `-c`). Off by default.
 - `-u` : Perform UDP scan on common ports (53, 161, 500) using nmap (significantly slower)
-- `-a` : Perform API endpoint detection on HTTP/HTTPS services (requires `curl`)
+- `-a` : Perform API endpoint detection on HTTP/HTTPS services (requires `curl`); also harvests TLS-certificate SANs to discover more hostnames
+- `-V` : CVE hinting — run nmap's `vulners` NSE against detected service versions
+- `-n target` : Notify on completion — `desktop` (macOS/`notify-send`) or a webhook URL (ntfy/Slack-style POST, requires `curl`)
+- `-p name` : Project name. Results go under `./projects/<name>/` and are diffed against that project's previous scan; skips the interactive project menu (useful for automation)
 
 `-d` and `-c` run full ASN-based network discovery and present an interactive selection menu for each input. `-f` skips that step by default; pass `-F` to opt in.
+
+**Environment tunables:** `NMAP_MAX_PARALLEL` (hosts/CIDR, default 4), `DNS_MAX_PARALLEL` (default 8), `CIDR_MAX_PARALLEL` (default 1), `WHOIS_CACHE_TTL` (seconds, default 86400).
+
+### Projects & scan-diff
+
+Every run belongs to a **project**. On startup (unless `-p` is given) ScanCannon shows a menu to pick an existing project or create a new one; results are kept separate under `./projects/<name>/results/`. Each run is snapshotted to `./projects/<name>/history/`, and the report includes a **Changes Since Last Scan** section — new and disappeared host:port services versus the project's previous scan — so repeated scans become attack-surface monitoring. A consolidated `report.html` and `findings.csv` are written per run.
 
 ### Examples
 
@@ -362,6 +371,6 @@ For the full license text, see [LICENSE](LICENSE).
 
 ---
 
-**ScanCannon v1.7 by J0hnnyXm4s**
+**ScanCannon v1.8 by J0hnnyXm4s**
 
 *"Efficient credential attack surface enumeration and general reconnaissance of massive network ranges"*

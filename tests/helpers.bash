@@ -17,6 +17,8 @@ load_scancannon() {
 }
 
 # Defaults for globals the functions expect to be set by the (untested) main flow.
+# These are read by the sourced scancannon.sh functions, not within this file.
+# shellcheck disable=SC2034
 scan_env_defaults() {
     MACOS=$([ "$(uname)" = "Darwin" ] && echo 1 || echo 0)
     API_SCAN=0
@@ -28,6 +30,9 @@ scan_env_defaults() {
     MASSCAN_RATE=5000
     MASSCAN_RATE_SHARE=5000
     DISCOVERED_API_ENDPOINTS=0
+    # Tests operate on ./results within the per-test tmpdir (no project menu).
+    RESULTS_DIR="./results"
+    PROJECTS_ROOT="./projects"
     WHOIS_CACHE_DIR="${BATS_TEST_TMPDIR}/wcache"
     WHOIS_CACHE_TTL=86400
     WHOIS_MAX_RETRIES=1

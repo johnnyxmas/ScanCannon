@@ -3,6 +3,7 @@
 paused.conf
 cidr.txt
 results/
+projects/
 scancannon.log
 scancannon.conf.tmp
 scancannon.conf.bak
