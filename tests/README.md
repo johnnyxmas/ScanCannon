@@ -30,18 +30,14 @@ git clone --depth 1 --branch v1.11.1 https://github.com/bats-core/bats-core.git 
 
 ## How functions are loaded
 
-`scancannon.sh` interleaves top-level imperative code (tool checks,
-`configure_adapter`, `getopts`, the scan orchestrator, the `INT` trap) with its
-function definitions, so it **cannot be sourced** without running the whole
-program. Until it is refactored to guard its main flow behind
-`main()` + a `BASH_SOURCE` check, `helpers.bash` extracts the testable functions
-into a temporary lib and sources that. The lib is validated with `bash -n` on
-every run, so if a function's shape drifts the suite fails loudly instead of
-testing stale code.
-
-> **Follow-up:** wrapping the imperative flow in a `main()` guarded by
-> `[ "${BASH_SOURCE[0]}" = "${0}" ]` would let the tests `source scancannon.sh`
-> directly and retire the extraction step.
+`scancannon.sh` gates every imperative block behind an `SC_EXECUTED` flag set
+from `[ "${BASH_SOURCE[0]}" = "${0}" ]`. When the file is **sourced** (as the
+tests do) that flag is `0`, so nothing runs — no banner, no update check, no
+scan, no `INT` trap — and only the function definitions and globals load.
+`helpers.bash` sources the real script directly, then resets shell options (the
+script sets `set -euo pipefail` for direct execution, which we don't want
+leaking into the test shell). Tests therefore exercise the exact production
+functions, not a copy.
 
 ## What's covered
 

@@ -1,4 +1,4 @@
-# ScanCannon v1.6
+# ScanCannon v1.7
 
 ![scancannon](https://i.imgur.com/jebggX7.png)
 
@@ -362,6 +362,6 @@ For the full license text, see [LICENSE](LICENSE).
 
 ---
 
-**ScanCannon v1.6 by J0hnnyXm4s**
+**ScanCannon v1.7 by J0hnnyXm4s**
 
 *"Efficient credential attack surface enumeration and general reconnaissance of massive network ranges"*

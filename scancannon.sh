@@ -1,8 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
+# Detect execution vs. sourcing. The test suite sources this file to load its
+# functions without running the scan; every imperative block below is gated on
+# SC_EXECUTED so sourcing has no side effects (no banner, no scan, no traps).
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then SC_EXECUTED=1; else SC_EXECUTED=0; fi
+
 #Logging
 LOG_FILE="scancannon.log"
+
+if [ "$SC_EXECUTED" = 1 ]; then
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo ""
@@ -13,7 +20,8 @@ echo "╚════██║██║     ██╔══██║██║╚
 echo "███████║╚██████╗██║  ██║██║ ╚████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║╚██████╔╝██║ ╚████║";
 echo "╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝";
 
-echo -e "••¤(×[¤ ScanCannon v1.6 by J0hnnyXm4s ¤]×)¤••\n"
+echo -e "••¤(×[¤ ScanCannon v1.7 by J0hnnyXm4s ¤]×)¤••\n"
+fi
 
 # ===== PROGRESS TRACKING SYSTEM =====
 
@@ -107,33 +115,35 @@ cleanup_progress() {
     rm -f "$PROGRESS_FILE" "${PROGRESS_FILE}.tmp" 2>/dev/null
 }
 
-# Check for updates
-# Use the same branch name for checking and pulling
-REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
-LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
-#Check if MacOS
-if [ "$(uname)" = "Darwin" ]; then
-MACOS=1
-REMOTE_TIMESTAMP=$(date -j -f "%a %d %b %Y %T" "$REMOTE_TIMESTAMP1" +%s)
-else
-MACOS=0
-REMOTE_TIMESTAMP=$(date -d "$REMOTE_TIMESTAMP1" +%s)
-fi
+# Detect OS early — needed by many helpers, and harmless when sourced.
+if [ "$(uname)" = "Darwin" ]; then MACOS=1; else MACOS=0; fi
 
-if [[ "$REMOTE_TIMESTAMP" -gt "$LOCAL_TIMESTAMP" ]]; then
-    read -r -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
-    case "$update_choice" in
-        y|Y )
-            if git pull origin master; then
-                echo "ScanCannon has been updated successfully."
-            else
-                echo "Failed to update ScanCannon via git. Please manually download the latest version from https://github.com/johnnyxmas/ScanCannon/"
-            fi
-            ;;
-        * )
-            echo "Update skipped. Continuing with the current version."
-            ;;
-    esac
+# Check for updates (only when run directly; skipped when sourced by tests).
+if [ "$SC_EXECUTED" = 1 ]; then
+    # Use the same branch name for checking and pulling
+    REMOTE_TIMESTAMP1=$(git log origin/master -n 1 --pretty=format:%cd scancannon.sh | awk '{print $1, $3, $2, $5, $4}')
+    LOCAL_TIMESTAMP=$(date -r "scancannon.sh" +%s)
+    if [ "$MACOS" = 1 ]; then
+        REMOTE_TIMESTAMP=$(date -j -f "%a %d %b %Y %T" "$REMOTE_TIMESTAMP1" +%s)
+    else
+        REMOTE_TIMESTAMP=$(date -d "$REMOTE_TIMESTAMP1" +%s)
+    fi
+
+    if [[ "$REMOTE_TIMESTAMP" -gt "$LOCAL_TIMESTAMP" ]]; then
+        read -r -p "A new version of ScanCannon is available. Do you want to update? [y/N]: " update_choice
+        case "$update_choice" in
+            y|Y )
+                if git pull origin master; then
+                    echo "ScanCannon has been updated successfully."
+                else
+                    echo "Failed to update ScanCannon via git. Please manually download the latest version from https://github.com/johnnyxmas/ScanCannon/"
+                fi
+                ;;
+            * )
+                echo "Update skipped. Continuing with the current version."
+                ;;
+        esac
+    fi
 fi
 
 #Help Text:
@@ -918,6 +928,7 @@ function validate_exclude_file() {
     return 0
 }
 
+if [ "$SC_EXECUTED" = 1 ]; then
 #Check if required tools are installed
 for tool in masscan nmap dig whois; do
 if ! command -v "$tool" >/dev/null 2>&1; then
@@ -930,6 +941,7 @@ done
 if [ ! -f "scancannon.conf" ]; then
     echo "ERROR: scancannon.conf not found. Please ensure the configuration file exists."
     exit 1
+fi
 fi
 
 # Function to detect network interfaces
@@ -1128,6 +1140,7 @@ function configure_adapter() {
     echo ""
 }
 
+if [ "$SC_EXECUTED" = 1 ]; then
 # Always offer network adapter configuration
 configure_adapter
 
@@ -1466,6 +1479,7 @@ else
         echo "Packet filter rule already exists. Skipping addition."
     fi
 fi
+fi  # end SC_EXECUTED setup block (tools/getopts/inputs/filters)
 
 #Initialize variables for summary
 TOTAL_IPS=0
@@ -1547,7 +1561,7 @@ send_notification "interrupted" "Run was cancelled before completion."
 echo -e "Exiting."
 exit 0
 }
-trap ctrl_c INT
+if [ "$SC_EXECUTED" = 1 ]; then trap ctrl_c INT; fi
 
 # ===== API ENDPOINT DETECTION FUNCTION =====
 function detect_api_endpoints() {
@@ -2245,6 +2259,7 @@ HTMLHEAD
     return 0
 }
 
+if [ "$SC_EXECUTED" = 1 ]; then
 # ===== ORCHESTRATE SCANNING ACROSS ALL CIDR RANGES =====
 NMAP_MAX_PARALLEL="${NMAP_MAX_PARALLEL:-4}"
 DNS_MAX_PARALLEL="${DNS_MAX_PARALLEL:-8}"
@@ -2346,3 +2361,4 @@ echo -e "\n【 Powering down ScanCannon. Please check for any personal belonging
 
 # Call cleanup function at the end of script
 cleanup
+fi  # end SC_EXECUTED main run

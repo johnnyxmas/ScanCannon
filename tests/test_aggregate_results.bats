@@ -55,7 +55,7 @@ _make_tree() {
 @test "aggregate_results returns 0 under set -e (regression: empty-file loop)" {
     # The dedup loop used to leave a non-zero status when the last global file
     # was empty, aborting the caller under 'set -e'. Guard that here.
-    run bash -euo pipefail -c "source '${BATS_TEST_TMPDIR}/scanlib.sh'; cd '${BATS_TEST_TMPDIR}'; aggregate_results; echo DONE_OK"
+    run bash -euo pipefail -c "source '${SCANCANNON_SH}'; cd '${BATS_TEST_TMPDIR}'; aggregate_results; echo DONE_OK"
     [ "$status" -eq 0 ]
     [[ "$output" == *"DONE_OK"* ]]
 }
